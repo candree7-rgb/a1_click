@@ -1,39 +1,39 @@
-// Imports
+// ---------- Imports ----------
 import express from "express";
 import cron from "node-cron";
 import fs from "fs";
 import { chromium } from "playwright";
 
-// ========= ENV =========
+// ---------- ENV ----------
 const env = {
   PORT: process.env.PORT || "8080",
 
-  // Betriebsfenster (UTC)
+  // Fenster (UTC)
   WINDOW_START: process.env.WINDOW_START || "00:00",
   WINDOW_END: process.env.WINDOW_END || "23:59",
-  HEARTBEAT_EVERY_MIN: Number(process.env.HEARTBEAT_EVERY_MIN || "30"),
+  HEARTBEAT_EVERY_MIN: Number(process.env.HEARTBEAT_EVERY_MIN || "10"),
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
 
-  // AlgosOne Login
+  // AlgosOne
   DASH_URL: process.env.DASH_URL || "https://app.algosone.ai/dashboard",
   LOGIN_URL: process.env.LOGIN_URL || "https://app.algosone.ai/login",
   LOGIN_METHOD: (process.env.LOGIN_METHOD || "password").toLowerCase(), // "password" | "google"
   EMAIL: process.env.EMAIL || "",
   PASSWORD: process.env.PASSWORD || "",
 
-  // optionaler HTTP-Auth
-  AUTH_TOKEN: process.env.AUTH_TOKEN || ""
+  // HTTP-Auth (optional)
+  AUTH_TOKEN: process.env.AUTH_TOKEN || "",
+
+  // Zeitlimits (Feintuning)
+  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "3000"),   // Wartezeit für FAST goto
+  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1500")   // kleine Pausen nach Klicks
 };
 
-const STORAGE_PATH = "/app/storageState.json"; // gespeicherte Cookies/Sessions
+// ---------- Helpers ----------
+const STORAGE_PATH = "/app/storageState.json";
 const DESKTOP_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
-if (process.env.STORAGE_STATE_B64 && !fs.existsSync(STORAGE_PATH)) {
-  fs.writeFileSync(STORAGE_PATH, Buffer.from(process.env.STORAGE_STATE_B64, "base64"));
-}
-
-// ========= Utils =========
 let approvesToday = 0;
 let busy = false;
 
@@ -43,79 +43,59 @@ const inWindow = () => {
   return cur >= toMin(env.WINDOW_START) && cur <= toMin(env.WINDOW_END);
 };
 
-async function withCtx(fn){
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
-  const contextOptions = {
-    userAgent: DESKTOP_UA,
-    viewport: { width: 1366, height: 820 },
-    deviceScaleFactor: 1
-  };
-  if (fs.existsSync(STORAGE_PATH)) contextOptions.storageState = STORAGE_PATH;
-
-  const ctx = await browser.newContext(contextOptions);
-  const page = await ctx.newPage();
-  try {
-    const r = await fn(page);
-    try { await ctx.storageState({ path: STORAGE_PATH }); } catch {}
-    await browser.close();
-    return r;
-  } catch (e) {
-    await browser.close();
-    throw e;
-  }
-}
-
 function onLoginUrl(page) {
   const u = page.url();
   return /app\.algosone\.ai\/login/i.test(u) || /accounts\.google\.com/i.test(u);
 }
+function logHere(page, tag){ console.log(`[${tag}] url= ${page.url()}`); }
 
-// ========= Login =========
-async function loginWithPassword(page) {
-  await page.goto(env.LOGIN_URL, { waitUntil: "networkidle", timeout: 90000 });
-  await page.locator('input[type="email"]').fill(env.EMAIL);
-  await page.locator('input[type="password"]').fill(env.PASSWORD);
-  await page.locator('button[type="submit"]').click();
-  await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 });
-}
+// ---------- Singleton-Browser ----------
+let browserP = null;
+let ctx = null;
 
-async function loginWithGoogle(page) {
-  await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await page.getByRole("button", { name: /google|continue with google|sign in with google|weiter mit google/i }).click();
-  await page.getByRole("textbox", { name: /email|phone|e-mail/i }).fill(env.EMAIL);
-  await page.getByRole("button", { name: /next|weiter/i }).click();
-  await page.getByRole("textbox", { name: /password|passwort/i }).fill(env.PASSWORD);
-  await page.getByRole("button", { name: /next|weiter/i }).click();
-  await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 });
-}
-
-async function ensureOnDashboard(page) {
-  await page.goto(env.DASH_URL, { waitUntil: "networkidle", timeout: 90000 });
-  if (!onLoginUrl(page)) return true;
-
-  if (!env.EMAIL || !env.PASSWORD) return false;
-  try {
-    if (env.LOGIN_METHOD === "google") await loginWithGoogle(page);
-    else await loginWithPassword(page);
-  } catch {
-    return false;
+async function getCtx() {
+  if (!browserP) {
+    browserP = chromium.launch({ headless: true, args: ["--no-sandbox"] });
   }
-  return !onLoginUrl(page);
+  const browser = await browserP;
+
+  if (!ctx) {
+    const options = {
+      userAgent: DESKTOP_UA,
+      viewport: { width: 1366, height: 820 },
+    };
+    if (fs.existsSync(STORAGE_PATH)) options.storageState = STORAGE_PATH;
+    ctx = await browser.newContext(options);
+  }
+  return ctx;
 }
 
-// ========= Banner/Confirm =========
+async function withCtx(fn) {
+  const context = await getCtx();
+  const page = await context.newPage();
+  try {
+    const r = await fn(page);
+    try { await context.storageState({ path: STORAGE_PATH }); } catch {}
+    return r;
+  } finally {
+    try { await page.close(); } catch {}
+  }
+}
+
+// ---------- Overlays / Confirm ----------
 async function dismissOverlays(page) {
   const candidates = [
-    page.getByRole("button", { name: /accept all|accept|agree|got it|okay|ok/i }).first(),
+    page.getByRole("button", { name: /accept all|accept|agree|got it|okay|ok|verstanden|zustimmen/i }).first(),
     page.locator('button:has-text("Accept")').first(),
     page.locator('button:has-text("I Agree")').first(),
-    page.getByRole("button", { name: /close|schließen|dismiss/i }).first()
+    page.getByRole("button", { name: /close|schließen|dismiss/i }).first(),
+    page.locator('[data-testid="cookie-policy-link"]').first()
   ];
   for (const c of candidates) {
     try {
       if (await c.count() > 0) {
-        await c.click().catch(()=>{});
-        await page.waitForTimeout(150);
+        await c.click({ timeout: 1000 }).catch(()=>{});
+        await page.waitForTimeout(100);
       }
     } catch {}
   }
@@ -127,39 +107,142 @@ async function maybeConfirm(page) {
   const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok|continue)$/i }).first();
   if (await btn.count() > 0) {
     await btn.click().catch(()=>{});
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(200);
   }
 }
 
-// ========= Approve =========
-async function tryApproveOnDashboard(page) {
-  await dismissOverlays(page);
+// ---------- Login ----------
+async function loginWithPassword(page) {
+  await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+  await dismissOverlays(page).catch(()=>{});
+  logHere(page, "loginPw:start");
 
-  // 1) Direkt sichtbarer Approve
-  let btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
+  const email =
+    page.getByLabel(/email/i)
+      .or(page.getByPlaceholder(/email|e-mail/i))
+      .or(page.locator('input[type="email"]'))
+      .first();
+  await email.waitFor({ state: "visible", timeout: 20000 });
+  await email.fill(env.EMAIL);
+
+  const pass =
+    page.getByLabel(/password|passwort/i)
+      .or(page.getByPlaceholder(/password|passwort/i))
+      .or(page.locator('input[type="password"]'))
+      .first();
+  await pass.waitFor({ state: "visible", timeout: 20000 });
+  await pass.fill(env.PASSWORD);
+
+  const submit =
+    page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i }).first()
+      .or(page.locator('button[type="submit"]')).first()
+      .or(page.locator('button:has-text("Sign in"), button:has-text("Log in"), button:has-text("Anmelden"), button:has-text("Login")')).first();
+
+  await submit.click({ timeout: 20000 }).catch(async () => {
+    await pass.press("Enter");
+  });
+
+  await page.waitForLoadState("networkidle", { timeout: 90000 });
+  await dismissOverlays(page).catch(()=>{});
+  logHere(page, "loginPw:afterSubmit");
+  await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 }).catch(()=>{});
+}
+
+async function loginWithGoogle(page) {
+  await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+  await dismissOverlays(page).catch(()=>{});
+  const gBtn = page.getByRole("button", { name: /google|continue with google|sign in with google|weiter mit google/i }).first();
+  await gBtn.click({ timeout: 20000 });
+
+  await page.waitForURL(/accounts\.google\.com/i, { timeout: 90000 });
+  await page.getByRole("textbox", { name: /email|phone|e-mail/i }).fill(env.EMAIL);
+  await page.getByRole("button", { name: /next|weiter/i }).click();
+
+  await page.getByRole("textbox", { name: /password|passwort/i }).fill(env.PASSWORD);
+  await page.getByRole("button", { name: /next|weiter/i }).click();
+
+  await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 });
+  await dismissOverlays(page).catch(()=>{});
+}
+
+async function ensureOnDashboard(page) {
+  await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS });
+  await dismissOverlays(page).catch(()=>{});
+  logHere(page, "ensure:afterGoto");
+
+  if (!onLoginUrl(page)) return true;
+
+  await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(()=>{});
+  await dismissOverlays(page).catch(()=>{});
+  logHere(page, "ensure:onLogin");
+
+  if (!env.EMAIL || !env.PASSWORD) return false;
+
+  try {
+    if (env.LOGIN_METHOD === "google") await loginWithGoogle(page);
+    else await loginWithPassword(page);
+  } catch (e) {
+    console.log("ensure:login error:", e.message || e);
+    return false;
+  }
+
+  await dismissOverlays(page).catch(()=>{});
+  logHere(page, "ensure:afterLogin");
+  return !onLoginUrl(page);
+}
+
+// ---------- Approve ----------
+async function findApprove(page, scope) {
+  let b = scope.getByRole("button", { name: /^(approve|genehmigen)$/i }).first();
+  if (await b.count() === 0) b = scope.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
+  return b;
+}
+
+async function tryApproveOnDashboard(page) {
+  const oneClick = page.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
+  const scope = (await oneClick.count()) > 0 ? oneClick : page;
+
+  // A) direkt
+  let btn = await findApprove(page, scope);
   if (await btn.count() > 0) {
-    await btn.click();
+    await btn.click().catch(()=>{});
     await maybeConfirm(page);
+    await page.waitForTimeout(env.CLICK_WAIT_MS);
     return true;
   }
 
-  // 2) (Optional) „New actions available“-Leiste öffnen
-  const newActions = page.locator("div,button,a").filter({ hasText: /new actions available/i }).first();
+  // B) Hinweis/Leiste
+  const newActions = page.locator("div,button,a").filter({ hasText: /new actions available|actions available/i }).first();
   if (await newActions.count() > 0) {
     await newActions.click().catch(()=>{});
-    await page.waitForTimeout(1200);
-    btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
+    await page.waitForTimeout(600);
+    btn = await findApprove(page, scope);
     if (await btn.count() > 0) {
-      await btn.click();
+      await btn.click().catch(()=>{});
       await maybeConfirm(page);
+      await page.waitForTimeout(env.CLICK_WAIT_MS);
       return true;
     }
+  }
+
+  // C) global
+  btn = page.getByRole("button", { name: /^(approve|genehmigen)$/i }).first();
+  if (await btn.count() === 0) btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
+  if (await btn.count() > 0) {
+    await btn.click().catch(()=>{});
+    await maybeConfirm(page);
+    await page.waitForTimeout(env.CLICK_WAIT_MS);
+    return true;
   }
 
   return false;
 }
 
-async function approveOne() {
+/**
+ * approveOne({ fast: true })  -> superschnell (<~5s), kein Reload-Loop
+ * approveOne({ fast: false }) -> robust, bis zu 5 Reloads + Relogin
+ */
+async function approveOne(opts = { fast: true }) {
   if (!inWindow()) return { ok:false, reason:"OUTSIDE_WINDOW" };
   if (approvesToday >= env.MAX_PER_DAY) return { ok:false, reason:"DAILY_LIMIT" };
   if (busy) return { ok:false, reason:"BUSY" };
@@ -167,14 +250,39 @@ async function approveOne() {
   busy = true;
   try {
     return await withCtx(async (page) => {
+      if (opts.fast) {
+        await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
+        await dismissOverlays(page).catch(()=>{});
+        logHere(page, "fast:afterGoto");
+
+        if (onLoginUrl(page)) {
+          return { ok:false, reason:"LOGIN_REQUIRED" };
+        }
+
+        const ok = await tryApproveOnDashboard(page);
+        if (ok) { approvesToday++; return { ok:true, reason: "APPROVED_FAST" }; }
+        return { ok:false, reason:"NO_BUTTON" };
+      }
+
+      // ROBUST
       const logged = await ensureOnDashboard(page);
       if (!logged) return { ok:false, reason:"LOGIN_REQUIRED" };
 
       for (let i = 0; i < 5; i++) {
         const ok = await tryApproveOnDashboard(page);
         if (ok) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
+
+        const bell = page.getByRole("button", { name: /notifications|bell/i }).first();
+        if (await bell.count() > 0) {
+          await bell.click().catch(()=>{});
+          await page.waitForTimeout(500);
+          const ok2 = await tryApproveOnDashboard(page);
+          if (ok2) { approvesToday++; return { ok:true, reason:"APPROVED_VIA_BELL" }; }
+        }
         await page.reload({ waitUntil: "networkidle" });
       }
+
+      try { await page.screenshot({ path: `no-approve-${Date.now()}.png`, fullPage: true }); } catch {}
       return { ok:false, reason:"NO_BUTTON" };
     });
   } catch (e) {
@@ -185,32 +293,39 @@ async function approveOne() {
   }
 }
 
-// ========= Heartbeat =========
+// ---------- Heartbeat ----------
 async function heartbeat(){
   if (!inWindow()) return;
   try {
     await withCtx(async (page) => {
-      await ensureOnDashboard(page); // relogin falls nötig
-      await page.waitForTimeout(300);
+      await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
+      if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) {
+        await ensureOnDashboard(page).catch(()=>{});
+      }
+      await dismissOverlays(page).catch(()=>{});
     });
   } catch(e){ console.error("Heartbeat:", e.message); }
 }
 cron.schedule(`*/${env.HEARTBEAT_EVERY_MIN} * * * *`, heartbeat, { timezone: "UTC" });
 cron.schedule("0 0 * * *", () => { approvesToday = 0; }, { timezone: "UTC" });
 
-// ========= HTTP Endpoints =========
+// ---------- HTTP Server ----------
 const app = express();
+
 function checkAuth(req,res,next){
   if (!env.AUTH_TOKEN) return next();
   const token = req.headers["x-auth"] || req.query.auth;
   if (token !== env.AUTH_TOKEN) return res.status(401).json({ ok:false, reason:"UNAUTHORIZED" });
   next();
 }
-app.get("/approve", checkAuth, async (_req,res)=> res.json(await approveOne()));
+
+app.get("/approve", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:false })));
+app.get("/approve-fast", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:true })));
+
 app.get("/login-status", checkAuth, async (_req,res)=>{
   try{
     const r = await withCtx(async page=>{
-      await page.goto(env.DASH_URL, { waitUntil:"domcontentloaded", timeout: 60000 });
+      await page.goto(env.DASH_URL, { waitUntil:"domcontentloaded", timeout: env.FAST_LOAD_MS });
       if (onLoginUrl(page)) {
         const ok = await ensureOnDashboard(page);
         return ok ? "OK" : "LOGIN_REQUIRED";
@@ -220,30 +335,40 @@ app.get("/login-status", checkAuth, async (_req,res)=>{
     res.json({ ok:true, status:r });
   } catch(e){ res.json({ ok:false, error:e.message }); }
 });
+
 app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
   hbEveryMin: env.HEARTBEAT_EVERY_MIN
 }));
 
-// Fast Webhook: Antwort sofort, Approve läuft im Hintergrund
+// ---- Fast webhook: sofort antworten, dann FAST → Fallback (ROBUST) ----
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
-  // optional: Log der Nachricht, schadet nicht
   try {
     const msg = (req.body && req.body.message) ? String(req.body.message) : "";
-    console.log("Signal received:", msg.slice(0, 120));
+    console.log("Signal received:", msg.slice(0, 160));
   } catch {}
-
-  // Sofort antworten (nicht auf Playwright warten)
   res.json({ ok: true, queued: true });
 
-  // Im Hintergrund ausführen
-  approveOne()
-    .then(r => console.log("approve-async result:", r))
-    .catch(e => console.error("approve-async error:", e.message));
+  let rFast = null;
+  try {
+    rFast = await approveOne({ fast: true });
+    console.log("approve-async fast:", rFast);
+  } catch (e) {
+    console.error("approve-async fast error:", e.message);
+  }
+
+  if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
+    try {
+      const r2 = await approveOne({ fast: false });
+      console.log("approve-async fallback:", r2);
+    } catch (e) {
+      console.error("approve-async fallback error:", e.message);
+    }
+  }
 });
 
-// ========= Start =========
+// ---------- Start ----------
 app.listen(Number(env.PORT), () => {
   console.log(`Approver Service up on ${env.PORT} | window ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
 });

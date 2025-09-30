@@ -1,3 +1,9 @@
+// Polyfill für gramJS / WebCrypto
+import { webcrypto } from "crypto";
+globalThis.crypto ??= webcrypto;
+globalThis.self ??= globalThis;
+
+// Restliche Imports
 import express from "express";
 import cron from "node-cron";
 import fs from "fs";
@@ -5,7 +11,6 @@ import { chromium } from "playwright";
 import { TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
-
 /* ========= ENV ========= */
 const env = {
   PORT: process.env.PORT || "8080",

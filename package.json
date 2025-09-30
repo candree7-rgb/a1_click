@@ -1,5 +1,5 @@
 {
-  "name": "algosone-approver-tg",
+  "name": "algosone-approver-gramjs",
   "version": "1.0.0",
   "type": "module",
   "scripts": { "start": "node index.js" },
@@ -7,7 +7,6 @@
     "express": "^4.19.2",
     "node-cron": "^3.0.3",
     "playwright": "^1.45.0",
-    "node-telegram-bot-api": "^0.66.0",
-    "body-parser": "^1.20.2"
+    "telegram": "^2.20.0"
   }
 }

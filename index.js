@@ -135,8 +135,40 @@ async function ensureOnDashboard(page) {
   return !onLoginUrl(page);
 }
 
+/* ========= Banner / Confirm ========= */
+async function dismissOverlays(page) {
+  // Cookie/Consent/Banner wegklicken (harmlos wenn nix da ist)
+  const candidates = [
+    page.getByRole("button", { name: /accept all|accept|agree|got it|okay|ok/i }).first(),
+    page.locator('button:has-text("Accept")').first(),
+    page.locator('button:has-text("I Agree")').first(),
+    page.getByRole("button", { name: /close|schließen|dismiss/i }).first()
+  ];
+  for (const c of candidates) {
+    try {
+      if (await c.count() > 0) {
+        await c.click({ timeout: 2000 }).catch(()=>{});
+        await page.waitForTimeout(150);
+      }
+    } catch {}
+  }
+}
+
+async function maybeConfirm(page) {
+  // Nur bestätigen, wenn ein echter Dialog offen ist
+  const dlg = page.getByRole("dialog");
+  if (await dlg.count() === 0) return;
+  const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok|continue)$/i }).first();
+  if (await btn.count() > 0) {
+    await btn.click().catch(()=>{});
+    await page.waitForTimeout(150);
+  }
+}
+
 /* ========= Approve ========= */
 async function tryApproveOnDashboard(page) {
+  await dismissOverlays(page);
+
   const oneClick = page.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
 
   const findApprove = async (scope) => {
@@ -151,8 +183,7 @@ async function tryApproveOnDashboard(page) {
   let btn = await findApprove(scope);
   if (await btn.count() > 0) {
     await btn.click();
-    const confirm = page.getByRole("button", { name: /confirm|yes|ok/i });
-    if (await confirm.count() > 0) await confirm.click();
+    await maybeConfirm(page);
     return true;
   }
 
@@ -164,8 +195,7 @@ async function tryApproveOnDashboard(page) {
     btn = await findApprove(scope);
     if (await btn.count() > 0) {
       await btn.click();
-      const confirm = page.getByRole("button", { name: /confirm|yes|ok/i });
-      if (await confirm.count() > 0) await confirm.click();
+      await maybeConfirm(page);
       return true;
     }
   }
@@ -175,8 +205,7 @@ async function tryApproveOnDashboard(page) {
   if (await btn.count() === 0) btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
   if (await btn.count() > 0) {
     await btn.click();
-    const confirm = page.getByRole("button", { name: /confirm|yes|ok/i });
-    if (await confirm.count() > 0) await confirm.click();
+    await maybeConfirm(page);
     return true;
   }
 
@@ -192,34 +221,35 @@ async function approveOne() {
   try {
     return await withCtx(async (page) => {
       const logged = await ensureOnDashboard(page);
-      if (!logged) { busy = false; return { ok:false, reason:"LOGIN_REQUIRED" }; }
+      if (!logged) return { ok:false, reason:"LOGIN_REQUIRED" };
 
       for (let i = 0; i < 5; i++) {
         const ok = await tryApproveOnDashboard(page);
-        if (ok) { approvesToday++; busy = false; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
+        if (ok) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
 
         const bell = page.getByRole("button", { name: /notifications|bell/i }).first();
         if (await bell.count() > 0) {
           await bell.click().catch(()=>{});
           await page.waitForTimeout(800);
           const ok2 = await tryApproveOnDashboard(page);
-          if (ok2) { approvesToday++; busy = false; return { ok:true, reason:"APPROVED_VIA_BELL" }; }
+          if (ok2) { approvesToday++; return { ok:true, reason:"APPROVED_VIA_BELL" }; }
         }
         await page.reload({ waitUntil: "networkidle" });
       }
 
       try { await page.screenshot({ path: `no-approve-${Date.now()}.png`, fullPage: true }); } catch {}
-      busy = false;
       return { ok:false, reason:"NO_BUTTON" };
     });
   } catch (e) {
     console.error("approveOne error:", e);
-    busy = false;
     return { ok:false, reason:"ERROR", msg: e.message };
+  } finally {
+    busy = false; // immer freigeben – auch nach Fehlern
   }
 }
 
 /* ========= Heartbeat ========= */
+// hält nur die Session warm, klickt NIE auf Approve
 async function heartbeat(){
   if (!inWindow()) return;
   try {
@@ -286,7 +316,7 @@ async function startTelegram() {
   // Event-Filter: nur bestimmte Chats, wenn gesetzt
   const filter = allowedChats.length ? new NewMessage({ chats: allowedChats }) : new NewMessage({});
   tgClient.addEventHandler(async (event) => {
-    // jede neue Nachricht triggert Approve
+    // jede neue Nachricht triggert Approve (nur dann, kein Autoklick sonst)
     const res = await approveOne();
     try {
       const chat = event.message.chatId || event.chatId;

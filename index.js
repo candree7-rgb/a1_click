@@ -25,7 +25,7 @@ const env = {
   AUTH_TOKEN: process.env.AUTH_TOKEN || ""
 };
 
-const STORAGE_PATH = "/app/storageState.json"; // optional: gespeicherte Cookies
+const STORAGE_PATH = "/app/storageState.json"; // gespeicherte Cookies/Sessions
 const DESKTOP_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
@@ -81,11 +81,11 @@ async function loginWithPassword(page) {
 
 async function loginWithGoogle(page) {
   await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await page.getByRole("button", { name: /google/i }).click();
-  await page.getByRole("textbox", { name: /email/i }).fill(env.EMAIL);
-  await page.getByRole("button", { name: /next/i }).click();
-  await page.getByRole("textbox", { name: /password/i }).fill(env.PASSWORD);
-  await page.getByRole("button", { name: /next/i }).click();
+  await page.getByRole("button", { name: /google|continue with google|sign in with google|weiter mit google/i }).click();
+  await page.getByRole("textbox", { name: /email|phone|e-mail/i }).fill(env.EMAIL);
+  await page.getByRole("button", { name: /next|weiter/i }).click();
+  await page.getByRole("textbox", { name: /password|passwort/i }).fill(env.PASSWORD);
+  await page.getByRole("button", { name: /next|weiter/i }).click();
   await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 });
 }
 
@@ -106,21 +106,25 @@ async function ensureOnDashboard(page) {
 // ========= Banner/Confirm =========
 async function dismissOverlays(page) {
   const candidates = [
-    page.getByRole("button", { name: /accept|agree|ok/i }).first(),
-    page.getByRole("button", { name: /close|schließen/i }).first()
+    page.getByRole("button", { name: /accept all|accept|agree|got it|okay|ok/i }).first(),
+    page.locator('button:has-text("Accept")').first(),
+    page.locator('button:has-text("I Agree")').first(),
+    page.getByRole("button", { name: /close|schließen|dismiss/i }).first()
   ];
   for (const c of candidates) {
-    if (await c.count() > 0) {
-      await c.click().catch(()=>{});
-      await page.waitForTimeout(150);
-    }
+    try {
+      if (await c.count() > 0) {
+        await c.click().catch(()=>{});
+        await page.waitForTimeout(150);
+      }
+    } catch {}
   }
 }
 
 async function maybeConfirm(page) {
   const dlg = page.getByRole("dialog");
   if (await dlg.count() === 0) return;
-  const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok)$/i }).first();
+  const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok|continue)$/i }).first();
   if (await btn.count() > 0) {
     await btn.click().catch(()=>{});
     await page.waitForTimeout(150);
@@ -131,12 +135,27 @@ async function maybeConfirm(page) {
 async function tryApproveOnDashboard(page) {
   await dismissOverlays(page);
 
-  const btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
+  // 1) Direkt sichtbarer Approve
+  let btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
   if (await btn.count() > 0) {
     await btn.click();
     await maybeConfirm(page);
     return true;
   }
+
+  // 2) (Optional) „New actions available“-Leiste öffnen
+  const newActions = page.locator("div,button,a").filter({ hasText: /new actions available/i }).first();
+  if (await newActions.count() > 0) {
+    await newActions.click().catch(()=>{});
+    await page.waitForTimeout(1200);
+    btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
+    if (await btn.count() > 0) {
+      await btn.click();
+      await maybeConfirm(page);
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -153,7 +172,7 @@ async function approveOne() {
 
       for (let i = 0; i < 5; i++) {
         const ok = await tryApproveOnDashboard(page);
-        if (ok) { approvesToday++; return { ok:true, reason:"APPROVED" }; }
+        if (ok) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
         await page.reload({ waitUntil: "networkidle" });
       }
       return { ok:false, reason:"NO_BUTTON" };
@@ -171,7 +190,7 @@ async function heartbeat(){
   if (!inWindow()) return;
   try {
     await withCtx(async (page) => {
-      await ensureOnDashboard(page);
+      await ensureOnDashboard(page); // relogin falls nötig
       await page.waitForTimeout(300);
     });
   } catch(e){ console.error("Heartbeat:", e.message); }
@@ -192,7 +211,11 @@ app.get("/login-status", checkAuth, async (_req,res)=>{
   try{
     const r = await withCtx(async page=>{
       await page.goto(env.DASH_URL, { waitUntil:"domcontentloaded", timeout: 60000 });
-      return onLoginUrl(page) ? "LOGIN_REQUIRED" : "OK";
+      if (onLoginUrl(page)) {
+        const ok = await ensureOnDashboard(page);
+        return ok ? "OK" : "LOGIN_REQUIRED";
+      }
+      return "OK";
     });
     res.json({ ok:true, status:r });
   } catch(e){ res.json({ ok:false, error:e.message }); }

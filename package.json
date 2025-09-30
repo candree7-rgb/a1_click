@@ -1,5 +1,5 @@
 {
-  "name": "a1click",
+  "name": "a1click-approver",
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
@@ -10,8 +10,7 @@
   "dependencies": {
     "express": "4.19.2",
     "node-cron": "3.0.3",
-    "playwright": "1.55.1",
-    "telegram": "2.26.21"
+    "playwright": "1.55.1"
   },
   "engines": {
     "node": ">=18"

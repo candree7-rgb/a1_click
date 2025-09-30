@@ -11,7 +11,9 @@ const env = {
   // Fenster (UTC)
   WINDOW_START: process.env.WINDOW_START || "00:00",
   WINDOW_END: process.env.WINDOW_END || "23:59",
-  HEARTBEAT_EVERY_MIN: Number(process.env.HEARTBEAT_EVERY_MIN || "10"),
+  HEARTBEAT_EVERY_MIN: Number(process.env.HEARTBEAT_EVERY_MIN || "10"), // wird nicht mehr genutzt
+  HEARTBEAT_MIN_MIN: Number(process.env.HEARTBEAT_MIN_MIN || "7"),
+  HEARTBEAT_MAX_MIN: Number(process.env.HEARTBEAT_MAX_MIN || "12"),
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
 
   // AlgosOne
@@ -191,57 +193,79 @@ async function ensureOnDashboard(page) {
   return !onLoginUrl(page);
 }
 
-// ---------- Approve ----------
-async function findApprove(page, scope) {
-  let b = scope.getByRole("button", { name: /^(approve|genehmigen)$/i }).first();
-  if (await b.count() === 0) b = scope.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
-  return b;
-}
-
+// ---------- Approve (verbessert) ----------
 async function tryApproveOnDashboard(page) {
-  const oneClick = page.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
+  // Clean + top
+  await dismissOverlays(page).catch(()=>{});
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(()=>{});
+  await page.waitForTimeout(120);
+
+  // Falls das blaue Ribbon existiert, zuerst öffnen
+  const ribbon = page.locator("div,button,a").filter({ hasText: /new actions available|actions available/i }).first();
+  if (await ribbon.count() > 0) {
+    await ribbon.click().catch(()=>{});
+    await page.waitForTimeout(600);
+  }
+
+  // Auf 1-click-trade Bereich einschränken, wenn vorhanden
+  const oneClick = page.locator("section,div,article").filter({ hasText: /1\s*[-]?\s*click\s*trade/i }).first();
   const scope = (await oneClick.count()) > 0 ? oneClick : page;
 
-  // A) direkt
-  let btn = await findApprove(page, scope);
-  if (await btn.count() > 0) {
-    await btn.click().catch(()=>{});
-    await maybeConfirm(page);
-    await page.waitForTimeout(env.CLICK_WAIT_MS);
-    return true;
-  }
-
-  // B) Hinweis/Leiste
-  const newActions = page.locator("div,button,a").filter({ hasText: /new actions available|actions available/i }).first();
-  if (await newActions.count() > 0) {
-    await newActions.click().catch(()=>{});
-    await page.waitForTimeout(600);
-    btn = await findApprove(page, scope);
-    if (await btn.count() > 0) {
-      await btn.click().catch(()=>{});
-      await maybeConfirm(page);
-      await page.waitForTimeout(env.CLICK_WAIT_MS);
-      return true;
+  // Helfer: klicke das erste sichtbare/aktivierte Element aus der Liste
+  async function clickFirstVisible(cands) {
+    for (const loc of cands) {
+      const n = await loc.count();
+      if (!n) continue;
+      for (let i = 0; i < Math.min(n, 8); i++) {
+        const el = loc.nth(i);
+        try {
+          if (await el.isVisible() && await el.isEnabled()) {
+            await el.click({ timeout: 1500 });
+            await maybeConfirm(page);
+            await page.waitForTimeout(env.CLICK_WAIT_MS);
+            return true;
+          }
+        } catch {}
+      }
     }
+    return false;
   }
 
-  // C) global
-  btn = page.getByRole("button", { name: /^(approve|genehmigen)$/i }).first();
-  if (await btn.count() === 0) btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
-  if (await btn.count() > 0) {
-    await btn.click().catch(()=>{});
-    await maybeConfirm(page);
-    await page.waitForTimeout(env.CLICK_WAIT_MS);
-    return true;
+  // Kandidaten im Scope (Buttons, Links, role=button, Klassen, reiner Text)
+  const scoped = [
+    scope.getByRole("button", { name: /^\s*approve\s*$/i }),
+    scope.getByRole("link",   { name: /^\s*approve\s*$/i }),
+    scope.locator('input[type="submit"][value*="Approve" i], input[type="button"][value*="Approve" i]'),
+    scope.locator('[role="button"]:has-text("Approve")'),
+    scope.locator('button:has-text("Approve"), a:has-text("Approve")'),
+    scope.locator('*:is(.btn, .button, [class*="btn"], [class*="Button"]):has-text("Approve")'),
+    scope.getByText(/^Approve$/i),           // reiner Textknoten
+    scope.locator('text=/^\\s*Approve\\s*$/i')
+  ];
+  if (await clickFirstVisible(scoped)) return true;
+
+  // Globaler Fallback (falls Scope knapp daneben liegt)
+  const global = [
+    page.getByRole("button", { name: /^\s*approve\s*$/i }),
+    page.getByRole("link",   { name: /^\s*approve\s*$/i }),
+    page.locator('[role="button"]:has-text("Approve")'),
+    page.locator('button:has-text("Approve"), a:has-text("Approve")'),
+    page.locator('*:is(.btn, .button, [class*="btn"], [class*="Button"]):has-text("Approve")'),
+    page.getByText(/^Approve$/i),
+    page.locator('text=/^\\s*Approve\\s*$/i')
+  ];
+  if (await clickFirstVisible(global)) return true;
+
+  // kleiner Scroll-Scan
+  for (const y of [400, 900, 1600]) {
+    await page.mouse.wheel(0, y);
+    await page.waitForTimeout(180);
+    if (await clickFirstVisible([...scoped, ...global])) return true;
   }
 
   return false;
 }
 
-/**
- * approveOne({ fast: true })  -> superschnell (<~5s), kein Reload-Loop
- * approveOne({ fast: false }) -> robust, bis zu 5 Reloads + Relogin
- */
 async function approveOne(opts = { fast: true }) {
   if (!inWindow()) return { ok:false, reason:"OUTSIDE_WINDOW" };
   if (approvesToday >= env.MAX_PER_DAY) return { ok:false, reason:"DAILY_LIMIT" };
@@ -293,7 +317,12 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- Heartbeat ----------
+// ---------- Heartbeat (randomisiert 7–12 min) ----------
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+let hbTimer = null;
 async function heartbeat(){
   if (!inWindow()) return;
   try {
@@ -304,9 +333,25 @@ async function heartbeat(){
       }
       await dismissOverlays(page).catch(()=>{});
     });
-  } catch(e){ console.error("Heartbeat:", e.message); }
+    console.log("🔄 Heartbeat OK");
+  } catch(e){
+    console.error("Heartbeat:", e.message);
+  }
 }
-cron.schedule(`*/${env.HEARTBEAT_EVERY_MIN} * * * *`, heartbeat, { timezone: "UTC" });
+
+function scheduleNextHeartbeat() {
+  const minMs = env.HEARTBEAT_MIN_MIN * 60_000;
+  const maxMs = env.HEARTBEAT_MAX_MIN * 60_000;
+  const jitter = randInt(0, 20) * 1000;
+  const delay = randInt(minMs, maxMs) + jitter;
+  console.log(`⏰ Next heartbeat in ~${(delay/60000).toFixed(1)} min`);
+  hbTimer = setTimeout(async () => {
+    await heartbeat();
+    scheduleNextHeartbeat();
+  }, delay);
+}
+
+// Reset Daily Counter
 cron.schedule("0 0 * * *", () => { approvesToday = 0; }, { timezone: "UTC" });
 
 // ---------- HTTP Server ----------
@@ -339,10 +384,10 @@ app.get("/login-status", checkAuth, async (_req,res)=>{
 app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
-  hbEveryMin: env.HEARTBEAT_EVERY_MIN
+  hbEveryMin: env.HEARTBEAT_MIN_MIN + "-" + env.HEARTBEAT_MAX_MIN
 }));
 
-// ---- Fast webhook: sofort antworten, dann FAST → Fallback (ROBUST) ----
+// ---- Fast webhook ----
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
   try {
     const msg = (req.body && req.body.message) ? String(req.body.message) : "";
@@ -371,4 +416,5 @@ app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (re
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
   console.log(`Approver Service up on ${env.PORT} | window ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
+  scheduleNextHeartbeat();
 });

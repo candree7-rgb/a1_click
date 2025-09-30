@@ -1,3 +1,5 @@
+// index.js — A1 Approver (Playwright)
+
 // ---------- Imports ----------
 import express from "express";
 import cron from "node-cron";
@@ -12,12 +14,14 @@ const env = {
   WINDOW_START: process.env.WINDOW_START || "00:00",
   WINDOW_END: process.env.WINDOW_END || "23:59",
 
-  // Heartbeat: randomisiertes Intervall (Minuten)
+  // Random Heartbeat (statt fixem Intervall)
   HEARTBEAT_MIN_MIN: Number(process.env.HEARTBEAT_MIN_MIN || "7"),
   HEARTBEAT_MAX_MIN: Number(process.env.HEARTBEAT_MAX_MIN || "12"),
 
-  // Limit pro Tag (praktisch unlimitiert per Default)
+  // Limits / Tuning
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
+  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),  // 1.5s super-schnell laden
+  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "900"), // kurze Pause nach Klick
 
   // AlgosOne
   DASH_URL: process.env.DASH_URL || "https://app.algosone.ai/dashboard",
@@ -26,46 +30,37 @@ const env = {
   EMAIL: process.env.EMAIL || "",
   PASSWORD: process.env.PASSWORD || "",
 
-  // HTTP-Auth (optional)
+  // HTTP-Auth für Endpunkte (optional)
   AUTH_TOKEN: process.env.AUTH_TOKEN || "",
 
-  // Zeitlimits / Klick-Pausen
-  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "3000"),   // kurze Ladezeit im FAST-Pfad
-  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1500"), // kleine Pause nach Klick
-
-  // Quick-Reload vor Aufgeben (falls Button erst nach Refresh kommt)
-  QUICK_RELOAD_TRIES: Number(process.env.QUICK_RELOAD_TRIES || "1"),
-  QUICK_RELOAD_DELAY: Number(process.env.QUICK_RELOAD_DELAY || "500") // ms
+  // Debug (optional)
+  DEBUG_SHOTS: /^true$/i.test(process.env.DEBUG_SHOTS || ""),
+  DEBUG_TRACE: /^true$/i.test(process.env.DEBUG_TRACE || ""),
 };
 
-// ---------- Helpers ----------
 const STORAGE_PATH = "/app/storageState.json";
 const DESKTOP_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
+// ---------- State ----------
 let approvesToday = 0;
 let busy = false;
 
-const toMin = s => { const [h,m]=s.split(":").map(Number); return h*60+m; };
+// ---------- Helpers ----------
+const toMin = (s) => { const [h,m]=s.split(":").map(Number); return h*60+m; };
 const inWindow = () => {
   const d = new Date(); const cur = d.getUTCHours()*60 + d.getUTCMinutes();
   return cur >= toMin(env.WINDOW_START) && cur <= toMin(env.WINDOW_END);
 };
+const onLoginUrl = (page) => /app\.algosone\.ai\/login/i.test(page.url()) || /accounts\.google\.com/i.test(page.url());
+const logHere = (page, tag) => console.log(`[${tag}] url= ${page.url()}`);
 
-function onLoginUrl(page) {
-  const u = page.url();
-  return /app\.algosone\.ai\/login/i.test(u) || /accounts\.google\.com/i.test(u);
-}
-function logHere(page, tag){ console.log(`[${tag}] url= ${page.url()}`); }
-
-// ---------- Singleton-Browser ----------
+// ---------- Singleton Browser / Context ----------
 let browserP = null;
 let ctx = null;
 
 async function getCtx() {
-  if (!browserP) {
-    browserP = chromium.launch({ headless: true, args: ["--no-sandbox"] });
-  }
+  if (!browserP) browserP = chromium.launch({ headless: true, args: ["--no-sandbox"] });
   const browser = await browserP;
 
   if (!ctx) {
@@ -75,6 +70,7 @@ async function getCtx() {
     };
     if (fs.existsSync(STORAGE_PATH)) options.storageState = STORAGE_PATH;
     ctx = await browser.newContext(options);
+    if (env.DEBUG_TRACE) await ctx.tracing.start({ screenshots: true, snapshots: true });
   }
   return ctx;
 }
@@ -101,170 +97,100 @@ async function dismissOverlays(page) {
     page.locator('[data-testid="cookie-policy-link"]').first()
   ];
   for (const c of candidates) {
-    try {
-      if (await c.count() > 0) {
-        await c.click({ timeout: 1000 }).catch(()=>{});
-        await page.waitForTimeout(100);
-      }
-    } catch {}
+    try { if (await c.count() > 0) { await c.click({ timeout: 800 }).catch(()=>{}); await page.waitForTimeout(80);} } catch {}
   }
 }
-
 async function maybeConfirm(page) {
   const dlg = page.getByRole("dialog");
   if (await dlg.count() === 0) return;
   const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok|continue)$/i }).first();
-  if (await btn.count() > 0) {
-    await btn.click().catch(()=>{});
-    await page.waitForTimeout(200);
-  }
+  if (await btn.count() > 0) { await btn.click().catch(()=>{}); await page.waitForTimeout(150); }
 }
 
 // ---------- Login ----------
 async function loginWithPassword(page) {
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
   await dismissOverlays(page).catch(()=>{});
-  logHere(page, "loginPw:start");
-
-  const email =
-    page.getByLabel(/email/i)
-      .or(page.getByPlaceholder(/email|e-mail/i))
-      .or(page.locator('input[type="email"]'))
-      .first();
-  await email.waitFor({ state: "visible", timeout: 20000 });
-  await email.fill(env.EMAIL);
-
-  const pass =
-    page.getByLabel(/password|passwort/i)
-      .or(page.getByPlaceholder(/password|passwort/i))
-      .or(page.locator('input[type="password"]'))
-      .first();
-  await pass.waitFor({ state: "visible", timeout: 20000 });
-  await pass.fill(env.PASSWORD);
-
-  const submit =
-    page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i }).first()
-      .or(page.locator('button[type="submit"]')).first()
-      .or(page.locator('button:has-text("Sign in"), button:has-text("Log in"), button:has-text("Anmelden"), button:has-text("Login")')).first();
-
-  await submit.click({ timeout: 20000 }).catch(async () => {
-    await pass.press("Enter");
-  });
-
+  const email = page.getByLabel(/email/i).or(page.getByPlaceholder(/email|e-mail/i)).or(page.locator('input[type="email"]')).first();
+  const pass  = page.getByLabel(/password|passwort/i).or(page.getByPlaceholder(/password|passwort/i)).or(page.locator('input[type="password"]')).first();
+  await email.waitFor({ state: "visible", timeout: 20000 }); await email.fill(env.EMAIL);
+  await pass.waitFor({ state: "visible", timeout: 20000 });  await pass.fill(env.PASSWORD);
+  const submit = page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i }).first()
+    .or(page.locator('button[type="submit"]')).first();
+  await submit.click({ timeout: 20000 }).catch(async ()=>{ await pass.press("Enter"); });
   await page.waitForLoadState("networkidle", { timeout: 90000 });
   await dismissOverlays(page).catch(()=>{});
-  logHere(page, "loginPw:afterSubmit");
   await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 }).catch(()=>{});
 }
-
 async function loginWithGoogle(page) {
   await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
   await dismissOverlays(page).catch(()=>{});
-  const gBtn = page.getByRole("button", { name: /google|continue with google|sign in with google|weiter mit google/i }).first();
-  await gBtn.click({ timeout: 20000 });
-
+  await page.getByRole("button", { name: /google|continue with google|sign in with google|weiter mit google/i }).first().click({ timeout: 20000 });
   await page.waitForURL(/accounts\.google\.com/i, { timeout: 90000 });
   await page.getByRole("textbox", { name: /email|phone|e-mail/i }).fill(env.EMAIL);
   await page.getByRole("button", { name: /next|weiter/i }).click();
-
   await page.getByRole("textbox", { name: /password|passwort/i }).fill(env.PASSWORD);
   await page.getByRole("button", { name: /next|weiter/i }).click();
-
   await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 });
   await dismissOverlays(page).catch(()=>{});
 }
-
 async function ensureOnDashboard(page) {
-  await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS });
+  await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
   await dismissOverlays(page).catch(()=>{});
-  logHere(page, "ensure:afterGoto");
-
   if (!onLoginUrl(page)) return true;
-
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(()=>{});
   await dismissOverlays(page).catch(()=>{});
-  logHere(page, "ensure:onLogin");
-
   if (!env.EMAIL || !env.PASSWORD) return false;
-
-  try {
-    if (env.LOGIN_METHOD === "google") await loginWithGoogle(page);
-    else await loginWithPassword(page);
-  } catch (e) {
-    console.log("ensure:login error:", e.message || e);
-    return false;
-  }
-
+  try { (env.LOGIN_METHOD === "google") ? await loginWithGoogle(page) : await loginWithPassword(page); }
+  catch { return false; }
   await dismissOverlays(page).catch(()=>{});
-  logHere(page, "ensure:afterLogin");
   return !onLoginUrl(page);
 }
 
-// ---------- Approve ----------
-async function findApprove(page, scope) {
-  // 1) exakter Button-Selector (falls eindeutig vorhanden)
-  const exact = page.locator('button:has-text("Approve")').first();
-  if (await exact.count() > 0) return exact;
-
-  // 2) normale Suche nach Approve/Genehmigen
-  let b = scope.getByRole("button", { name: /^(approve|genehmigen)$/i }).first();
-  if (await b.count() === 0) b = scope.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
-  return b;
+// ---------- Approve (smart, schnell) ----------
+function oneClickSection(page) {
+  return page.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
 }
+async function findApprove(page) {
+  const scope = (await oneClickSection(page).count()) > 0 ? oneClickSection(page) : page;
 
+  // 1) Sehr spezifisch: weißer Button mit Text "Approve"
+  let btn = scope.locator('button.btn-white:has-text("Approve")').first();
+
+  // 2) role/text Fallbacks
+  if (await btn.count() === 0) btn = scope.getByRole("button", { name: /^approve$/i }).first();
+  if (await btn.count() === 0) btn = scope.locator('button:has-text("Approve")').first();
+
+  // 3) als Notnagel: sichtbarer Button mit exakt "Approve" (Trim)
+  if (await btn.count() === 0) btn = scope.locator('button').filter({ hasText: /^Approve\s*$/i }).first();
+
+  return btn;
+}
+async function clickSmart(page, btn) {
+  try { await btn.scrollIntoViewIfNeeded(); } catch {}
+  try { await btn.click({ timeout: 800 }); return true; } catch {}
+  // JS-Click Fallback
+  try {
+    await page.evaluate((el) => el && el.click(), await btn.elementHandle());
+    return true;
+  } catch {}
+  // Maus-Fallback
+  try { const box = await btn.boundingBox(); if (box) { await page.mouse.click(box.x+box.width/2, box.y+box.height/2); return true; } } catch {}
+  return false;
+}
 async function tryApproveOnDashboard(page) {
-  const oneClick = page.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
-  const scope = (await oneClick.count()) > 0 ? oneClick : page;
-
-  // A) direkt
-  let btn = await findApprove(page, scope);
-  if (await btn.count() > 0) {
-    await btn.click().catch(()=>{});
-    await maybeConfirm(page);
-    await page.waitForTimeout(env.CLICK_WAIT_MS);
-    return true;
-  }
-
-  // B) Hinweis/Leiste
-  const newActions = page.locator("div,button,a").filter({ hasText: /new actions available|actions available/i }).first();
-  if (await newActions.count() > 0) {
-    await newActions.click().catch(()=>{});
-    await page.waitForTimeout(600);
-    btn = await findApprove(page, scope);
-    if (await btn.count() > 0) {
-      await btn.click().catch(()=>{});
-      await maybeConfirm(page);
-      await page.waitForTimeout(env.CLICK_WAIT_MS);
-      return true;
-    }
-  }
-
-  // C) global
-  btn = page.getByRole("button", { name: /^(approve|genehmigen)$/i }).first();
-  if (await btn.count() === 0) btn = page.locator('button:has-text("Approve"), button:has-text("Genehmigen")').first();
-  if (await btn.count() > 0) {
-    await btn.click().catch(()=>{});
-    await maybeConfirm(page);
-    await page.waitForTimeout(env.CLICK_WAIT_MS);
-    return true;
-  }
-
-  return false;
-}
-
-// Quick-Reload vor Aufgeben (schnell, domcontentloaded)
-async function quickReloadAndTry(page) {
-  for (let i = 0; i < env.QUICK_RELOAD_TRIES; i++) {
-    await page.reload({ waitUntil: "domcontentloaded" }).catch(()=>{});
-    await page.waitForTimeout(env.QUICK_RELOAD_DELAY);
-    if (await tryApproveOnDashboard(page)) return true;
-  }
-  return false;
+  const btn = await findApprove(page);
+  if (await btn.count() === 0) return false;
+  const ok = await clickSmart(page, btn);
+  if (!ok) return false;
+  await maybeConfirm(page);
+  await page.waitForTimeout(env.CLICK_WAIT_MS);
+  return true;
 }
 
 /**
- * approveOne({ fast: true })  -> superschnell, kein schwerer Reload-Loop
- * approveOne({ fast: false }) -> robust, mit Reloads + Relogin
+ * approveOne({ fast:true })  -> super schnell: kein Reload-Loop, kein Login
+ * approveOne({ fast:false }) -> robust: Login/Reload bis zu 5×
  */
 async function approveOne(opts = { fast: true }) {
   if (!inWindow()) return { ok:false, reason:"OUTSIDE_WINDOW" };
@@ -277,43 +203,35 @@ async function approveOne(opts = { fast: true }) {
       if (opts.fast) {
         await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
         await dismissOverlays(page).catch(()=>{});
-        logHere(page, "fast:afterGoto");
-
-        if (onLoginUrl(page)) {
-          return { ok:false, reason:"LOGIN_REQUIRED" };
-        }
-
-        let ok = await tryApproveOnDashboard(page);
-        if (!ok) ok = await quickReloadAndTry(page); // << Quick-Reload vor Aufgeben
-        if (ok) { approvesToday++; return { ok:true, reason: "APPROVED_FAST" }; }
+        console.log("[fast:afterGoto] url=", page.url());
+        if (onLoginUrl(page)) return { ok:false, reason:"LOGIN_REQUIRED" };
+        const ok = await tryApproveOnDashboard(page);
+        if (ok) { approvesToday++; return { ok:true, reason:"APPROVED_FAST" }; }
         return { ok:false, reason:"NO_BUTTON" };
       }
 
-      // ROBUST
       const logged = await ensureOnDashboard(page);
       if (!logged) return { ok:false, reason:"LOGIN_REQUIRED" };
 
       for (let i = 0; i < 5; i++) {
-        // erster Durchlauf: schnell versuchen, bevor wir heavier reloaden
-        if (i === 0) {
-          const quick = await quickReloadAndTry(page);
-          if (quick) { approvesToday++; return { ok:true, reason:"APPROVED_AFTER_QUICK_RELOAD" }; }
-        }
-
-        const ok = await tryApproveOnDashboard(page);
-        if (ok) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
-
+        if (await tryApproveOnDashboard(page)) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
         const bell = page.getByRole("button", { name: /notifications|bell/i }).first();
-        if (await bell.count() > 0) {
+        if (await bell.count()) {
           await bell.click().catch(()=>{});
-          await page.waitForTimeout(500);
-          const ok2 = await tryApproveOnDashboard(page);
-          if (ok2) { approvesToday++; return { ok:true, reason:"APPROVED_VIA_BELL" }; }
+          await page.waitForTimeout(400);
+          if (await tryApproveOnDashboard(page)) { approvesToday++; return { ok:true, reason:"APPROVED_VIA_BELL" }; }
         }
-        await page.reload({ waitUntil: "networkidle" });
+        await page.reload({ waitUntil: "networkidle" }).catch(()=>{});
       }
 
-      try { await page.screenshot({ path: `no-approve-${Date.now()}.png`, fullPage: true }); } catch {}
+      if (env.DEBUG_SHOTS) {
+        try {
+          const ts = Date.now();
+          await page.screenshot({ path: `no-approve-${ts}.png`, fullPage: true });
+          const html = await page.content();
+          fs.writeFileSync(`no-approve-${ts}.html`, html);
+        } catch {}
+      }
       return { ok:false, reason:"NO_BUTTON" };
     });
   } catch (e) {
@@ -324,97 +242,64 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- Heartbeat (randomisiert 7–12 min) ----------
-function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
+// ---------- Heartbeat (random 7–12 min) ----------
+const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 let hbTimer = null;
 async function heartbeat(){
   if (!inWindow()) return;
   try {
     await withCtx(async (page) => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
-      if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) {
-        await ensureOnDashboard(page).catch(()=>{});
-      }
+      if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) await ensureOnDashboard(page).catch(()=>{});
       await dismissOverlays(page).catch(()=>{});
     });
     console.log("🔄 Heartbeat OK");
-  } catch(e){
-    console.error("Heartbeat:", e.message);
-  }
+  } catch(e){ console.error("Heartbeat:", e.message); }
 }
-
 function scheduleNextHeartbeat() {
   const minMs = env.HEARTBEAT_MIN_MIN * 60_000;
   const maxMs = env.HEARTBEAT_MAX_MIN * 60_000;
-  const jitter = randInt(0, 20) * 1000;
-  const delay = randInt(minMs, maxMs) + jitter;
+  const jitter = rnd(0, 20) * 1000;
+  const delay = rnd(minMs, maxMs) + jitter;
   console.log(`⏰ Next heartbeat in ~${(delay/60000).toFixed(1)} min`);
-  hbTimer = setTimeout(async () => {
-    await heartbeat();
-    scheduleNextHeartbeat();
-  }, delay);
+  hbTimer = setTimeout(async () => { await heartbeat(); scheduleNextHeartbeat(); }, delay);
 }
-
-// Reset Daily Counter
+// Reset Tageszähler
 cron.schedule("0 0 * * *", () => { approvesToday = 0; }, { timezone: "UTC" });
 
-// ---------- HTTP Server ----------
+// ---------- HTTP ----------
 const app = express();
-
 function checkAuth(req,res,next){
   if (!env.AUTH_TOKEN) return next();
   const token = req.headers["x-auth"] || req.query.auth;
   if (token !== env.AUTH_TOKEN) return res.status(401).json({ ok:false, reason:"UNAUTHORIZED" });
   next();
 }
-
 app.get("/approve", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:false })));
 app.get("/approve-fast", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:true })));
-
 app.get("/login-status", checkAuth, async (_req,res)=>{
   try{
     const r = await withCtx(async page=>{
       await page.goto(env.DASH_URL, { waitUntil:"domcontentloaded", timeout: env.FAST_LOAD_MS });
-      if (onLoginUrl(page)) {
-        const ok = await ensureOnDashboard(page);
-        return ok ? "OK" : "LOGIN_REQUIRED";
-      }
+      if (onLoginUrl(page)) return (await ensureOnDashboard(page)) ? "OK" : "LOGIN_REQUIRED";
       return "OK";
     });
     res.json({ ok:true, status:r });
   } catch(e){ res.json({ ok:false, error:e.message }); }
 });
-
 app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
-  hbEveryMin: `${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}`
+  hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`
 }));
-
-// ---- Fast webhook: sofort antworten, dann FAST → Fallback (ROBUST) ----
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
-  try {
-    const msg = (req.body && req.body.message) ? String(req.body.message) : "";
-    console.log("Signal received:", msg.slice(0, 160));
-  } catch {}
+  try { const msg = (req.body && req.body.message) ? String(req.body.message) : ""; console.log("Signal received:", msg.slice(0, 160)); } catch {}
   res.json({ ok: true, queued: true });
 
   let rFast = null;
-  try {
-    rFast = await approveOne({ fast: true });
-    console.log("approve-async fast:", rFast);
-  } catch (e) {
-    console.error("approve-async fast error:", e.message);
-  }
-
+  try { rFast = await approveOne({ fast: true }); console.log("approve-async fast:", rFast); } catch (e) { console.error("approve-async fast error:", e.message); }
   if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
-    try {
-      const r2 = await approveOne({ fast: false });
-      console.log("approve-async fallback:", r2);
-    } catch (e) {
-      console.error("approve-async fallback error:", e.message);
-    }
+    try { const r2 = await approveOne({ fast: false }); console.log("approve-async fallback:", r2); } catch (e) { console.error("approve-async fallback error:", e.message); }
   }
 });
 

@@ -226,6 +226,23 @@ app.get("/health", (_req,res)=> res.json({
   hbEveryMin: env.HEARTBEAT_EVERY_MIN
 }));
 
+// Fast Webhook: Antwort sofort, Approve läuft im Hintergrund
+app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
+  // optional: Log der Nachricht, schadet nicht
+  try {
+    const msg = (req.body && req.body.message) ? String(req.body.message) : "";
+    console.log("Signal received:", msg.slice(0, 120));
+  } catch {}
+
+  // Sofort antworten (nicht auf Playwright warten)
+  res.json({ ok: true, queued: true });
+
+  // Im Hintergrund ausführen
+  approveOne()
+    .then(r => console.log("approve-async result:", r))
+    .catch(e => console.error("approve-async error:", e.message));
+});
+
 // ========= Start =========
 app.listen(Number(env.PORT), () => {
   console.log(`Approver Service up on ${env.PORT} | window ${env.WINDOW_START}-${env.WINDOW_END} UTC`);

@@ -11,16 +11,16 @@ const env = {
   PORT: process.env.PORT || "8080",
 
   // Betriebsfenster (UTC)
-  WINDOW_START: process.env.WINDOW_START || "00:00",
-  WINDOW_END: process.env.WINDOW_END || "23:59",
+  WINDOW_START: process.env.WINDOW_START || "08:00",
+  WINDOW_END: process.env.WINDOW_END || "20:30",
 
-  // Random Heartbeat (statt fixem Intervall)
+  // Random Heartbeat im Fenster (statt fixem Intervall)
   HEARTBEAT_MIN_MIN: Number(process.env.HEARTBEAT_MIN_MIN || "7"),
   HEARTBEAT_MAX_MIN: Number(process.env.HEARTBEAT_MAX_MIN || "12"),
 
   // Limits / Tuning
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
-  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),  // 1.5s super-schnell laden
+  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),  // superschnelles Laden
   CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "900"), // kurze Pause nach Klick
 
   // AlgosOne
@@ -30,7 +30,7 @@ const env = {
   EMAIL: process.env.EMAIL || "",
   PASSWORD: process.env.PASSWORD || "",
 
-  // HTTP-Auth für Endpunkte (optional)
+  // HTTP-Auth (optional)
   AUTH_TOKEN: process.env.AUTH_TOKEN || "",
 
   // Debug (optional)
@@ -52,7 +52,18 @@ const inWindow = () => {
   const d = new Date(); const cur = d.getUTCHours()*60 + d.getUTCMinutes();
   return cur >= toMin(env.WINDOW_START) && cur <= toMin(env.WINDOW_END);
 };
-const onLoginUrl = (page) => /app\.algosone\.ai\/login/i.test(page.url()) || /accounts\.google\.com/i.test(page.url());
+const nowUtcMin = () => { const d=new Date(); return d.getUTCHours()*60 + d.getUTCMinutes(); };
+const minutesUntilWindowStart = () => {
+  const now = nowUtcMin();
+  const start = toMin(env.WINDOW_START);
+  const end   = toMin(env.WINDOW_END);
+  if (now < start) return start - now;           // später heute
+  if (now > end)   return (24*60 - now) + start; // morgen
+  return 0; // bereits im Fenster
+};
+
+const onLoginUrl = (page) =>
+  /app\.algosone\.ai\/login/i.test(page.url()) || /accounts\.google\.com/i.test(page.url());
 const logHere = (page, tag) => console.log(`[${tag}] url= ${page.url()}`);
 
 // ---------- Singleton Browser / Context ----------
@@ -97,14 +108,22 @@ async function dismissOverlays(page) {
     page.locator('[data-testid="cookie-policy-link"]').first()
   ];
   for (const c of candidates) {
-    try { if (await c.count() > 0) { await c.click({ timeout: 800 }).catch(()=>{}); await page.waitForTimeout(80);} } catch {}
+    try {
+      if (await c.count() > 0) {
+        await c.click({ timeout: 800 }).catch(()=>{});
+        await page.waitForTimeout(80);
+      }
+    } catch {}
   }
 }
 async function maybeConfirm(page) {
   const dlg = page.getByRole("dialog");
   if (await dlg.count() === 0) return;
   const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok|continue)$/i }).first();
-  if (await btn.count() > 0) { await btn.click().catch(()=>{}); await page.waitForTimeout(150); }
+  if (await btn.count() > 0) {
+    await btn.click().catch(()=>{});
+    await page.waitForTimeout(150);
+  }
 }
 
 // ---------- Login ----------
@@ -147,7 +166,7 @@ async function ensureOnDashboard(page) {
   return !onLoginUrl(page);
 }
 
-// ---------- Approve (smart, schnell) ----------
+// ---------- Approve (smart & schnell) ----------
 function oneClickSection(page) {
   return page.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
 }
@@ -161,8 +180,8 @@ async function findApprove(page) {
   if (await btn.count() === 0) btn = scope.getByRole("button", { name: /^approve$/i }).first();
   if (await btn.count() === 0) btn = scope.locator('button:has-text("Approve")').first();
 
-  // 3) als Notnagel: sichtbarer Button mit exakt "Approve" (Trim)
-  if (await btn.count() === 0) btn = scope.locator('button').filter({ hasText: /^Approve\s*$/i }).first();
+  // 3) Notnagel: sichtbarer Button exakt "Approve"
+  if (await btn.count() === 0) btn = scope.locator("button").filter({ hasText: /^Approve\s*$/i }).first();
 
   return btn;
 }
@@ -170,10 +189,7 @@ async function clickSmart(page, btn) {
   try { await btn.scrollIntoViewIfNeeded(); } catch {}
   try { await btn.click({ timeout: 800 }); return true; } catch {}
   // JS-Click Fallback
-  try {
-    await page.evaluate((el) => el && el.click(), await btn.elementHandle());
-    return true;
-  } catch {}
+  try { await page.evaluate((el) => el && el.click(), await btn.elementHandle()); return true; } catch {}
   // Maus-Fallback
   try { const box = await btn.boundingBox(); if (box) { await page.mouse.click(box.x+box.width/2, box.y+box.height/2); return true; } } catch {}
   return false;
@@ -203,7 +219,7 @@ async function approveOne(opts = { fast: true }) {
       if (opts.fast) {
         await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
         await dismissOverlays(page).catch(()=>{});
-        console.log("[fast:afterGoto] url=", page.url());
+        logHere(page, "fast:afterGoto");
         if (onLoginUrl(page)) return { ok:false, reason:"LOGIN_REQUIRED" };
         const ok = await tryApproveOnDashboard(page);
         if (ok) { approvesToday++; return { ok:true, reason:"APPROVED_FAST" }; }
@@ -215,6 +231,7 @@ async function approveOne(opts = { fast: true }) {
 
       for (let i = 0; i < 5; i++) {
         if (await tryApproveOnDashboard(page)) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
+
         const bell = page.getByRole("button", { name: /notifications|bell/i }).first();
         if (await bell.count()) {
           await bell.click().catch(()=>{});
@@ -242,9 +259,10 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- Heartbeat (random 7–12 min) ----------
+// ---------- Heartbeat (schläft außerhalb des Fensters) ----------
 const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 let hbTimer = null;
+
 async function heartbeat(){
   if (!inWindow()) return;
   try {
@@ -253,30 +271,49 @@ async function heartbeat(){
       if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) await ensureOnDashboard(page).catch(()=>{});
       await dismissOverlays(page).catch(()=>{});
     });
-    console.log("🔄 Heartbeat OK");
+    console.log("🫀 Heartbeat OK");
   } catch(e){ console.error("Heartbeat:", e.message); }
 }
-function scheduleNextHeartbeat() {
+
+function scheduleNextHeartbeat(){
+  clearTimeout(hbTimer);
+  const minsToStart = minutesUntilWindowStart();
+
+  if (minsToStart > 0){
+    const delayMs = (minsToStart*60 + rnd(0,20)) * 1000; // kleiner Jitter
+    console.log(`😴 Outside window. Sleeping ~${(delayMs/60000).toFixed(1)} min until window opens.`);
+    hbTimer = setTimeout(() => {
+      heartbeat().finally(scheduleNextHeartbeat);
+    }, delayMs);
+    return;
+  }
+
   const minMs = env.HEARTBEAT_MIN_MIN * 60_000;
   const maxMs = env.HEARTBEAT_MAX_MIN * 60_000;
-  const jitter = rnd(0, 20) * 1000;
-  const delay = rnd(minMs, maxMs) + jitter;
+  const delay = rnd(minMs, maxMs) + rnd(0,20)*1000;
   console.log(`⏰ Next heartbeat in ~${(delay/60000).toFixed(1)} min`);
-  hbTimer = setTimeout(async () => { await heartbeat(); scheduleNextHeartbeat(); }, delay);
+  hbTimer = setTimeout(async ()=>{
+    await heartbeat();
+    scheduleNextHeartbeat();
+  }, delay);
 }
+
 // Reset Tageszähler
 cron.schedule("0 0 * * *", () => { approvesToday = 0; }, { timezone: "UTC" });
 
 // ---------- HTTP ----------
 const app = express();
+
 function checkAuth(req,res,next){
   if (!env.AUTH_TOKEN) return next();
   const token = req.headers["x-auth"] || req.query.auth;
   if (token !== env.AUTH_TOKEN) return res.status(401).json({ ok:false, reason:"UNAUTHORIZED" });
   next();
 }
+
 app.get("/approve", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:false })));
 app.get("/approve-fast", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:true })));
+
 app.get("/login-status", checkAuth, async (_req,res)=>{
   try{
     const r = await withCtx(async page=>{
@@ -287,11 +324,14 @@ app.get("/login-status", checkAuth, async (_req,res)=>{
     res.json({ ok:true, status:r });
   } catch(e){ res.json({ ok:false, error:e.message }); }
 });
+
 app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
   hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`
 }));
+
+// Fast Webhook: erst FAST, dann Fallback
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
   try { const msg = (req.body && req.body.message) ? String(req.body.message) : ""; console.log("Signal received:", msg.slice(0, 160)); } catch {}
   res.json({ ok: true, queued: true });

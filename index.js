@@ -171,21 +171,30 @@ function allScopes(page) {
 }
 
 async function findApproveInScope(scope) {
+  // 0) Sehr präzise: innerhalb #signals
+  let btn = scope.locator('#signals button:has-text("Approve")').first();
+  if (await btn.count() > 0) return btn;
+
+  // 0b) Innerhalb d-flex text-end (dein Screenshot)
+  btn = scope.locator('.d-flex.text-end button:has-text("Approve")').first();
+  if (await btn.count() > 0) return btn;
+
+  // 1) Weißer Button mit Text
   const section = oneClickSection(scope);
   const area = (await section.count()) > 0 ? section : scope;
-
-  // 1) sehr spezifisch (weißer Button)
-  let btn = area.locator('button.btn-white:has-text("Approve")').first();
+  btn = area.locator('button.btn.btn-white:has-text("Approve")').first();
+  if (await btn.count() > 0) return btn;
 
   // 2) Role + exakter Name
-  if (await btn.count() === 0) btn = area.getByRole("button", { name: /^approve$/i }).first();
+  btn = area.getByRole("button", { name: /^approve$/i }).first();
+  if (await btn.count() > 0) return btn;
 
   // 3) normaler Text-Button
-  if (await btn.count() === 0) btn = area.locator('button:has-text("Approve")').first();
+  btn = area.locator('button:has-text("Approve")').first();
+  if (await btn.count() > 0) return btn;
 
-  // 4) exakter Text (Playwright getByText)
-  if (await btn.count() === 0) btn = area.getByText(/^Approve\s*$/i).first();
-
+  // 4) exakter Text (Notnagel)
+  btn = area.getByText(/^Approve\s*$/i).first();
   return btn;
 }
 

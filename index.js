@@ -1,4 +1,4 @@
-// index.js — A1 Approver (Playwright) + BULLETPROOF CLICK + strict verify + rich debug
+// index.js — A1 Approver (Playwright) + GUARANTEED REFRESH + MAX_AGE + BULLETPROOF CLICK
 
 import express from "express";
 import cron from "node-cron";
@@ -19,14 +19,15 @@ const env = {
   WINDOW_END: process.env.WINDOW_END || "23:59",
 
   // Random Heartbeat
-  HEARTBEAT_MIN_MIN: Number(process.env.HEARTBEAT_MIN_MIN || "7"),
-  HEARTBEAT_MAX_MIN: Number(process.env.HEARTBEAT_MAX_MIN || "12"),
+  HEARTBEAT_MIN_MIN: Number(process.env.HEARTBEAT_MIN_MIN || "5"),
+  HEARTBEAT_MAX_MIN: Number(process.env.HEARTBEAT_MAX_MIN || "8"),
 
   // Limits / Tuning
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
-  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),
-  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1500"),
-  POST_CLICK_VERIFY_MS: Number(process.env.POST_CLICK_VERIFY_MS || "4000"),
+  MAX_AGE_SEC: Number(process.env.MAX_AGE_SEC || "10"), // ← NEU: Max Sekunden seit Signal
+  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1200"),
+  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1000"),
+  POST_CLICK_VERIFY_MS: Number(process.env.POST_CLICK_VERIFY_MS || "3000"),
 
   // AlgosOne
   DASH_URL: process.env.DASH_URL || "https://app.algosone.ai/dashboard",
@@ -164,7 +165,7 @@ async function ensureOnDashboard(page) {
   return !onLoginUrl(page);
 }
 
-// ---------- Approve (BULLETPROOF: Mouse-First + Text-Fallback) ----------
+// ---------- Approve (BULLETPROOF: Mouse-First + Text-Fallback + Guaranteed Refresh) ----------
 function allScopes(page) { return [page, ...page.frames()]; }
 
 // Multi-Layer Finder: Button → Text-in-Button → Pure Text-Node
@@ -215,7 +216,7 @@ async function clickRobust(page, locator, type) {
   } catch {}
   
   // Warte auf Animationen
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(200);
   
   let box = null;
   try {
@@ -223,7 +224,6 @@ async function clickRobust(page, locator, type) {
   } catch {}
   
   if (!box) {
-    logLine("⚠ No bounding box, trying element handle");
     const el = await locator.elementHandle().catch(() => null);
     if (el) {
       box = await page.evaluate((node) => {
@@ -233,7 +233,7 @@ async function clickRobust(page, locator, type) {
     }
   }
   
-  // PRIO 1: MOUSE CLICK (ignoriert ALLES - Overlays, z-index, etc.)
+  // PRIO 1: MOUSE CLICK (ignoriert ALLES)
   if (box && box.width > 0 && box.height > 0) {
     try {
       const x = box.x + box.width / 2;
@@ -242,11 +242,11 @@ async function clickRobust(page, locator, type) {
       logLine(`🖱️ Mouse click at ${Math.round(x)},${Math.round(y)}`);
       
       await page.mouse.move(x, y);
-      await page.waitForTimeout(100);
-      await page.mouse.down();
       await page.waitForTimeout(80);
+      await page.mouse.down();
+      await page.waitForTimeout(60);
       await page.mouse.up();
-      await page.waitForTimeout(200);
+      await page.waitForTimeout(150);
       
       logLine("✓ mouse-click");
       return 'mouse-click';
@@ -255,17 +255,17 @@ async function clickRobust(page, locator, type) {
     }
   }
   
-  // PRIO 2: Force Click (überspringt actionability checks)
+  // PRIO 2: Force Click
   try { 
     await locator.click({ timeout: 1500, force: true, delay: 80 }); 
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(150);
     logLine("✓ force-click");
     return 'force-click'; 
   } catch (e) {
     logLine("⚠ force-click failed:", e.message.slice(0, 80));
   }
   
-  // PRIO 3: JS Event Dispatch (für React/Vue)
+  // PRIO 3: JS Event Dispatch
   try {
     const el = await locator.elementHandle();
     if (el) { 
@@ -287,7 +287,7 @@ async function clickRobust(page, locator, type) {
         
         node.click();
       }, el);
-      await page.waitForTimeout(200);
+      await page.waitForTimeout(150);
       logLine("✓ js-events");
       return 'js-events'; 
     }
@@ -295,20 +295,20 @@ async function clickRobust(page, locator, type) {
     logLine("⚠ js-events failed:", e.message.slice(0, 80));
   }
   
-  // PRIO 4: Normaler Click (falls alles andere fehlschlägt)
+  // PRIO 4: Normaler Click
   try { 
     await locator.click({ timeout: 1000, delay: 80 }); 
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(150);
     logLine("✓ normal-click");
     return 'normal-click'; 
   } catch (e) {
     logLine("⚠ normal-click failed:", e.message.slice(0, 80));
   }
   
-  // PRIO 5: Doppelklick (absolute Notlösung)
+  // PRIO 5: Doppelklick
   try { 
     await locator.dblclick({ timeout: 1000, force: true, delay: 80 }); 
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(150);
     logLine("✓ dbl-click");
     return 'dbl-click'; 
   } catch (e) {
@@ -335,7 +335,7 @@ async function verifyApproved(page, targetBefore) {
       }
     } catch {}
 
-    // 2. Button-Zustand (nur wenn es ein Button war)
+    // 2. Button-Zustand
     try {
       const count = await targetBefore.count();
       if (count === 0) { 
@@ -401,22 +401,12 @@ async function verifyApproved(page, targetBefore) {
 }
 
 async function tryApproveOnDashboard(page) {
-  // Warte auf 1-click trade Section
-  try {
-    const section = page.locator('text=/1[- ]?click trade/i').first();
-    await section.waitFor({ state: 'visible', timeout: 4000 });
-    logLine("✓ 1-click trade visible");
-  } catch {
-    logLine("⚠ 1-click trade not found");
-  }
-
-  // Kurze Pause für dynamische Inhalte
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(300);
 
   for (const scope of allScopes(page)) {
     const targets = await findApproveTargets(scope);
     
-    logLine(`Found ${targets.length} potential targets in scope`);
+    logLine(`Found ${targets.length} potential targets`);
     
     if (targets.length === 0) continue;
 
@@ -425,7 +415,6 @@ async function tryApproveOnDashboard(page) {
       
       logLine(`🎯 Trying: ${why} (${type})`);
       
-      // Inspect target
       try {
         const isVisible = await locator.isVisible().catch(() => false);
         const box = await locator.boundingBox().catch(() => null);
@@ -440,7 +429,6 @@ async function tryApproveOnDashboard(page) {
         logLine("   ⚠ Inspection failed:", e.message.slice(0, 60));
       }
 
-      // CLICK
       const clickWay = await clickRobust(scope, locator, type);
       
       if (!clickWay) {
@@ -448,17 +436,12 @@ async function tryApproveOnDashboard(page) {
         continue;
       }
 
-      // Check für Confirm-Dialog
       await page.waitForTimeout(300);
       await maybeConfirm(scope);
-      
-      // Warte vor Verify
       await page.waitForTimeout(env.CLICK_WAIT_MS);
 
-      // VERIFY
       const verdict = await verifyApproved(scope, locator);
 
-      // Debug-Screenshot
       if (env.DEBUG_SHOTS) {
         const base = path.join(DEBUG_DIR, `click-${Date.now()}-${verdict.ok ? 'OK' : 'FAIL'}`);
         try {
@@ -478,10 +461,22 @@ async function tryApproveOnDashboard(page) {
 }
 
 /**
- * approveOne({ fast:true })  -> super schnell: kein Reload-Loop, kein Login
- * approveOne({ fast:false }) -> robust: Login/Reload bis zu 5×
+ * approveOne({ fast:true, signalTime: Date.now() })
  */
-async function approveOne(opts = { fast: true }) {
+async function approveOne(opts = { fast: true, signalTime: null }) {
+  // Check MAX_AGE
+  if (opts.signalTime) {
+    const ageMs = Date.now() - opts.signalTime;
+    const ageSec = Math.round(ageMs / 1000);
+    
+    if (ageSec > env.MAX_AGE_SEC) {
+      logLine(`⏰ Signal too old: ${ageSec}s > ${env.MAX_AGE_SEC}s MAX_AGE`);
+      return { ok: false, reason: "SIGNAL_TOO_OLD", ageSec };
+    }
+    
+    logLine(`⏱️ Signal age: ${ageSec}s (max ${env.MAX_AGE_SEC}s)`);
+  }
+  
   if (!inWindow()) return { ok:false, reason:"OUTSIDE_WINDOW" };
   if (approvesToday >= env.MAX_PER_DAY) return { ok:false, reason:"DAILY_LIMIT" };
   if (busy) return { ok:false, reason:"BUSY" };
@@ -490,13 +485,24 @@ async function approveOne(opts = { fast: true }) {
   try {
     return await withCtx(async (page) => {
       if (opts.fast) {
-        await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
+        // LOAD
+        await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS });
         await dismissOverlays(page).catch(()=>{});
         logLine(`[${ts()} fast] url=`, page.url());
+        
         if (onLoginUrl(page)) return { ok:false, reason:"LOGIN_REQUIRED" };
 
+        // GUARANTEED REFRESH (Button kommt IMMER erst danach)
+        logLine("🔄 Guaranteed refresh (button always appears after)");
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 2500 });
+        await dismissOverlays(page).catch(()=>{});
+        await page.waitForTimeout(300);
+
         const ok = await tryApproveOnDashboard(page);
-        if (ok) { approvesToday++; return { ok:true, reason:"APPROVED_FAST" }; }
+        if (ok) {
+          approvesToday++;
+          return { ok:true, reason:"APPROVED_FAST" };
+        }
 
         if (env.DEBUG_SHOTS) {
           const base = path.join(DEBUG_DIR, `no-approve-fast-${Date.now()}`);
@@ -508,6 +514,7 @@ async function approveOne(opts = { fast: true }) {
         return { ok:false, reason:"NO_BUTTON" };
       }
 
+      // SLOW MODE: Login + multiple Reloads
       const logged = await ensureOnDashboard(page);
       if (!logged) return { ok:false, reason:"LOGIN_REQUIRED" };
 
@@ -528,8 +535,9 @@ async function approveOne(opts = { fast: true }) {
         }
         
         if (i < 4) {
-          logLine(`Reload attempt ${i + 1}/5`);
-          await page.reload({ waitUntil: "networkidle" }).catch(()=>{});
+          logLine(`Reload attempt ${i + 2}/5`);
+          await page.reload({ waitUntil: "domcontentloaded" }).catch(()=>{});
+          await page.waitForTimeout(400);
         }
       }
 
@@ -550,7 +558,7 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- Heartbeat (random 7–12 min) ----------
+// ---------- Heartbeat (random 5–8 min) ----------
 const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 async function heartbeat(){
   if (!inWindow()) return;
@@ -585,8 +593,8 @@ function checkAuth(req,res,next){
   next();
 }
 
-app.get("/approve", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:false })));
-app.get("/approve-fast", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:true })));
+app.get("/approve", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:false, signalTime: Date.now() })));
+app.get("/approve-fast", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:true, signalTime: Date.now() })));
 
 app.get("/login-status", checkAuth, async (_req,res)=>{
   try{
@@ -603,29 +611,46 @@ app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
   hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`,
+  maxAgeSec: env.MAX_AGE_SEC,
   approvesToday
 }));
 
 // Webhook vom Forwarder (antwortet sofort; arbeitet dann async)
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
+  const signalTime = Date.now(); // Timestamp beim Empfang
+  
   try { 
     const msg = (req.body && req.body.message) ? String(req.body.message) : ""; 
     logLine("📨 Signal received:", msg.slice(0, 160)); 
   } catch {}
+  
   res.json({ ok: true, queued: true });
 
   (async () => {
     let rFast = null;
     try { 
-      rFast = await approveOne({ fast: true }); 
+      rFast = await approveOne({ fast: true, signalTime }); 
       logLine("approve-async fast:", rFast); 
     } catch (e) { 
       logLine("approve-async fast error:", e.message); 
     }
     
+    // Fallback nur wenn nicht zu alt UND kein Button gefunden
+    if (rFast && rFast.reason === "SIGNAL_TOO_OLD") {
+      logLine("⏰ Skipping fallback (signal too old)");
+      return;
+    }
+    
     if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
+      // Check Age nochmal vor Fallback
+      const ageSec = Math.round((Date.now() - signalTime) / 1000);
+      if (ageSec > env.MAX_AGE_SEC) {
+        logLine(`⏰ Skipping fallback (age ${ageSec}s > ${env.MAX_AGE_SEC}s)`);
+        return;
+      }
+      
       try { 
-        const r2 = await approveOne({ fast: false }); 
+        const r2 = await approveOne({ fast: false, signalTime }); 
         logLine("approve-async fallback:", r2); 
       } catch (e) { 
         logLine("approve-async fallback error:", e.message); 
@@ -754,6 +779,7 @@ app.listen(Number(env.PORT), () => {
   logLine(`🚀 Approver Service up on port ${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`);
-  logLine(`🎯 Click strategy: Mouse-first (overlay-proof) + text-fallback`);
+  logLine(`⏱️ Max signal age: ${env.MAX_AGE_SEC}s`);
+  logLine(`🎯 Strategy: Guaranteed refresh + mouse-first click`);
   scheduleNextHeartbeat();
 });

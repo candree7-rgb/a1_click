@@ -1,4 +1,4 @@
-// index.js — A1 Approver (Playwright) + robust click + hybrid selectors + debug
+// index.js — A1 Approver (Playwright) + strict verify + rich debug
 
 import express from "express";
 import cron from "node-cron";
@@ -25,8 +25,8 @@ const env = {
   // Limits / Tuning
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
   FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),
-  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "900"),
-  POST_CLICK_VERIFY_MS: Number(process.env.POST_CLICK_VERIFY_MS || "2500"),
+  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1000"),
+  POST_CLICK_VERIFY_MS: Number(process.env.POST_CLICK_VERIFY_MS || "3000"),
 
   // AlgosOne
   DASH_URL: process.env.DASH_URL || "https://app.algosone.ai/dashboard",
@@ -40,7 +40,9 @@ const env = {
 
   // Debug
   DEBUG_SHOTS: /^true$/i.test(process.env.DEBUG_SHOTS || ""),
-  DEBUG_TRACE: /^true$/i.test(process.env.DEBUG_TRACE || "")
+  DEBUG_TRACE: /^true$/i.test(process.env.DEBUG_TRACE || ""),
+  STRICT_VERIFY: /^true$/i.test(process.env.STRICT_VERIFY || "false"),
+  NET_OK_REGEX: process.env.NET_OK_REGEX || "approve|oneclick|confirm|execute",
 };
 
 const STORAGE_PATH = "/app/storageState.json";
@@ -53,6 +55,10 @@ try { if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true }
 // ---------- State ----------
 let approvesToday = 0;
 let busy = false;
+
+// in-memory log tail
+const LOG_RING = [];
+function logLine(...args){ const s = args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" "); const line = `[${new Date().toISOString()}] ${s}`; console.log(line); LOG_RING.push(line); if (LOG_RING.length > 5000) LOG_RING.shift(); }
 
 // ---------- Helpers ----------
 const toMin = (s) => { const [h,m]=s.split(":").map(Number); return h*60+m; };
@@ -108,7 +114,6 @@ async function dismissOverlays(page) {
     try { if (await c.count() > 0) { await c.click({ timeout: 800 }).catch(()=>{}); await page.waitForTimeout(80);} } catch {}
   }
 }
-
 async function maybeConfirm(page) {
   const dlg = page.getByRole("dialog");
   if (await dlg.count() === 0) return;
@@ -163,109 +168,114 @@ async function ensureOnDashboard(page) {
 function oneClickSection(scope) {
   return scope.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
 }
-function allScopes(page) {
-  const frames = page.frames();
-  return [page, ...frames];
-}
+function allScopes(page) { return [page, ...page.frames()]; }
 
-// Hybrid: erst superspezifisch (#signals, .d-flex.text-end), dann 1-click-Bereich, dann generische Fallbacks
+// Hybrid: erst superspezifisch (#signals, .d-flex.text-end), dann 1-click-Bereich, dann Fallbacks
 async function findApproveInScope(scope) {
   let btn = scope.locator('#signals button:has-text("Approve")').first();
-  if (await btn.count() > 0) return btn;
+  if (await btn.count() > 0) return { btn, why: '#signals' };
 
   btn = scope.locator('.d-flex.text-end button:has-text("Approve")').first();
-  if (await btn.count() > 0) return btn;
+  if (await btn.count() > 0) return { btn, why: '.d-flex.text-end' };
 
   const section = oneClickSection(scope);
   const area = (await section.count()) > 0 ? section : scope;
 
   btn = area.locator('button.btn-white:has-text("Approve")').first();
-  if (await btn.count() > 0) return btn;
+  if (await btn.count() > 0) return { btn, why: 'btn-white' };
 
   btn = area.getByRole("button", { name: /^approve$/i }).first();
-  if (await btn.count() > 0) return btn;
+  if (await btn.count() > 0) return { btn, why: 'role=button[name=Approve]' };
 
   btn = area.locator('button:has-text("Approve")').first();
-  if (await btn.count() > 0) return btn;
+  if (await btn.count() > 0) return { btn, why: 'button:has-text(Approve)' };
 
   const txt = area.getByText(/^Approve\s*$/i).first();
   if (await txt.count() > 0) {
     const maybeBtn = txt.locator('xpath=ancestor::button[1]').first();
-    if (await maybeBtn.count() > 0) return maybeBtn;
-    return txt; // allerletzter Notnagel
+    if (await maybeBtn.count() > 0) return { btn: maybeBtn, why: 'text->ancestor button' };
+    return { btn: txt, why: 'text-node only' }; // allerletzter Notnagel
   }
 
-  return area.locator('button:has-text("Approve")').first();
+  return { btn: area.locator('button:has-text("Approve")').first(), why: 'last-resort' };
 }
 
 async function clickSmart(page, btn) {
   try { await btn.scrollIntoViewIfNeeded(); } catch {}
-  try { await btn.click({ timeout: 800 }); return true; } catch {}
+  try { await btn.click({ timeout: 800 }); return 'dom-click'; } catch {}
   try {
     const el = await btn.elementHandle();
-    if (el) { await page.evaluate((node) => node.click(), el); return true; }
+    if (el) { await page.evaluate((node) => node.click(), el); return 'js-click'; }
   } catch {}
   try {
     const box = await btn.boundingBox();
-    if (box) { await page.mouse.click(box.x + box.width/2, box.y + box.height/2); return true; }
+    if (box) { await page.mouse.click(box.x + box.width/2, box.y + box.height/2); return 'mouse-click'; }
   } catch {}
-  return false;
+  return null;
 }
 
 async function verifyApproved(page, btnBefore) {
   const started = Date.now();
   const okToast = page.getByText(/approved|executed|success|done|trade (approved|executed)/i).first();
+  const netRe = new RegExp(env.NET_OK_REGEX, "i");
+  let via = null;
 
   while (Date.now() - started < env.POST_CLICK_VERIFY_MS) {
-    try { if (await okToast.count()) return true; } catch {}
+    try {
+      if (await okToast.count()) { via = 'toast'; break; }
+    } catch {}
 
     try {
       const el = await btnBefore.elementHandle();
       if (el) {
         const disabled = await el.getAttribute("disabled");
-        if (disabled !== null) return true;
+        if (disabled !== null) { via = 'disabled'; break; }
         const text = (await el.textContent())?.trim() || "";
-        if (/^approved|processing|execut/i.test(text)) return true;
+        if (/^approved|processing|execut/i.test(text)) { via = 'text-change'; break; }
       } else {
-        return true; // Button aus DOM verschwunden
+        via = 'gone'; break; // Button aus DOM
       }
     } catch {}
 
-    try {
-      const resp = await page.waitForResponse(r =>
-        /approve/i.test(r.url()) && r.ok(),
-        { timeout: 250 }
-      ).catch(()=>null);
-      if (resp) return true;
-    } catch {}
+    const resp = await page.waitForResponse(r =>
+      netRe.test(r.url()) && r.request().method() !== 'OPTIONS' && r.ok(),
+      { timeout: 250 }
+    ).catch(()=>null);
+    if (resp) { via = 'net-ok'; break; }
 
     await page.waitForTimeout(100);
   }
-  return false;
+
+  const ok = env.STRICT_VERIFY ? (via === 'net-ok') : !!via;
+  return { ok, via: via || 'timeout' };
 }
 
 async function tryApproveOnDashboard(page) {
   for (const scope of allScopes(page)) {
-    const btn = await findApproveInScope(scope);
+    const { btn, why } = await findApproveInScope(scope);
     if (await btn.count() === 0) continue;
 
-    const clicked = await clickSmart(scope, btn);
-    if (!clicked) continue;
+    const clickWay = await clickSmart(scope, btn);
+    logLine("clicked", { why, clickWay });
+
+    if (!clickWay) continue;
 
     await maybeConfirm(scope);
     await page.waitForTimeout(env.CLICK_WAIT_MS);
 
-    const ok = await verifyApproved(scope, btn);
-    if (ok) return true;
+    const verdict = await verifyApproved(scope, btn);
+    logLine("verify", verdict);
 
     if (env.DEBUG_SHOTS) {
-      const base = path.join(DEBUG_DIR, `post-click-no-change-${Date.now()}`);
+      const base = path.join(DEBUG_DIR, `after-click-${Date.now()}-${verdict.ok ? 'OK' : 'NO'}`);
       try {
         await page.screenshot({ path: `${base}.png`, fullPage: true });
         fs.writeFileSync(`${base}.html`, await page.content());
-        console.log(`🧩 Saved debug files: ${base}.png / .html`);
       } catch {}
     }
+
+    if (verdict.ok) return true;
+    // else: try other scopes/selectors
   }
   return false;
 }
@@ -285,17 +295,17 @@ async function approveOne(opts = { fast: true }) {
       if (opts.fast) {
         await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
         await dismissOverlays(page).catch(()=>{});
-        console.log(`[${ts()} fast] url=`, page.url());
+        logLine(`[${ts()} fast] url=`, page.url());
         if (onLoginUrl(page)) return { ok:false, reason:"LOGIN_REQUIRED" };
 
         const ok = await tryApproveOnDashboard(page);
         if (ok) { approvesToday++; return { ok:true, reason:"APPROVED_FAST" }; }
+
         if (env.DEBUG_SHOTS) {
           const base = path.join(DEBUG_DIR, `no-approve-fast-${Date.now()}`);
           try {
             await page.screenshot({ path: `${base}.png`, fullPage: true });
             fs.writeFileSync(`${base}.html`, await page.content());
-            console.log(`🧩 Saved debug files: ${base}.png / .html`);
           } catch {}
         }
         return { ok:false, reason:"NO_BUTTON" };
@@ -321,7 +331,6 @@ async function approveOne(opts = { fast: true }) {
         try {
           await page.screenshot({ path: `${base}.png`, fullPage: true });
           fs.writeFileSync(`${base}.html`, await page.content());
-          console.log(`🧩 Saved debug files: ${base}.png / .html`);
         } catch {}
       }
       return { ok:false, reason:"NO_BUTTON" };
@@ -344,15 +353,15 @@ async function heartbeat(){
       if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) await ensureOnDashboard(page).catch(()=>{});
       await dismissOverlays(page).catch(()=>{});
     });
-    console.log("🔄 Heartbeat OK");
-  } catch(e){ console.error("Heartbeat:", e.message); }
+    logLine("🔄 Heartbeat OK");
+  } catch(e){ logLine("Heartbeat ERR:", e.message); }
 }
 function scheduleNextHeartbeat() {
   const minMs = env.HEARTBEAT_MIN_MIN * 60_000;
   const maxMs = env.HEARTBEAT_MAX_MIN * 60_000;
   const jitter = rnd(0, 20) * 1000;
   const delay = rnd(minMs, maxMs) + jitter;
-  console.log(`⏰ Next heartbeat in ~${(delay/60000).toFixed(1)} min`);
+  logLine(`⏰ Next heartbeat in ~${(delay/60000).toFixed(1)} min`);
   setTimeout(async () => { await heartbeat(); scheduleNextHeartbeat(); }, delay);
 }
 
@@ -391,13 +400,13 @@ app.get("/health", (_req,res)=> res.json({
 
 // Webhook vom Forwarder (antwortet sofort; arbeitet dann async)
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
-  try { const msg = (req.body && req.body.message) ? String(req.body.message) : ""; console.log("Signal received:", msg.slice(0, 160)); } catch {}
+  try { const msg = (req.body && req.body.message) ? String(req.body.message) : ""; logLine("Signal received:", msg.slice(0, 160)); } catch {}
   res.json({ ok: true, queued: true });
 
   let rFast = null;
-  try { rFast = await approveOne({ fast: true }); console.log("approve-async fast:", rFast); } catch (e) { console.error("approve-async fast error:", e.message); }
+  try { rFast = await approveOne({ fast: true }); logLine("approve-async fast:", rFast); } catch (e) { logLine("approve-async fast error:", e.message); }
   if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
-    try { const r2 = await approveOne({ fast: false }); console.log("approve-async fallback:", r2); } catch (e) { console.error("approve-async fallback error:", e.message); }
+    try { const r2 = await approveOne({ fast: false }); logLine("approve-async fallback:", r2); } catch (e) { logLine("approve-async fallback error:", e.message); }
   }
 });
 
@@ -470,8 +479,13 @@ app.get("/debug/file/:name", checkAuth, (req, res) => {
   }
 });
 
+// Tail der In-Memory-Logs
+app.get("/debug/logs", checkAuth, (_req, res) => {
+  res.json({ ok:true, lines: LOG_RING.slice(-300) });
+});
+
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  console.log(`Approver Service up on ${env.PORT} | window ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
+  logLine(`Approver Service up on ${env.PORT} | window ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   scheduleNextHeartbeat();
 });

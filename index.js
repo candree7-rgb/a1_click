@@ -1,4 +1,4 @@
-// index.js — A1 Approver (Playwright) + strict verify + rich debug
+// index.js — A1 Approver (Playwright) + BULLETPROOF CLICK + strict verify + rich debug
 
 import express from "express";
 import cron from "node-cron";
@@ -25,8 +25,8 @@ const env = {
   // Limits / Tuning
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
   FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),
-  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1000"),
-  POST_CLICK_VERIFY_MS: Number(process.env.POST_CLICK_VERIFY_MS || "3000"),
+  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1500"),
+  POST_CLICK_VERIFY_MS: Number(process.env.POST_CLICK_VERIFY_MS || "4000"),
 
   // AlgosOne
   DASH_URL: process.env.DASH_URL || "https://app.algosone.ai/dashboard",
@@ -42,7 +42,7 @@ const env = {
   DEBUG_SHOTS: /^true$/i.test(process.env.DEBUG_SHOTS || ""),
   DEBUG_TRACE: /^true$/i.test(process.env.DEBUG_TRACE || ""),
   STRICT_VERIFY: /^true$/i.test(process.env.STRICT_VERIFY || "false"),
-  NET_OK_REGEX: process.env.NET_OK_REGEX || "approve|oneclick|confirm|execute",
+  NET_OK_REGEX: process.env.NET_OK_REGEX || "approve|oneclick|confirm|execute|trade",
 };
 
 const STORAGE_PATH = "/app/storageState.json";
@@ -164,119 +164,316 @@ async function ensureOnDashboard(page) {
   return !onLoginUrl(page);
 }
 
-// ---------- Approve (hybrid finder + robust click) ----------
-function oneClickSection(scope) {
-  return scope.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
-}
+// ---------- Approve (BULLETPROOF: Mouse-First + Text-Fallback) ----------
 function allScopes(page) { return [page, ...page.frames()]; }
 
-// Hybrid: erst superspezifisch (#signals, .d-flex.text-end), dann 1-click-Bereich, dann Fallbacks
-async function findApproveInScope(scope) {
-  let btn = scope.locator('#signals button:has-text("Approve")').first();
-  if (await btn.count() > 0) return { btn, why: '#signals' };
-
-  btn = scope.locator('.d-flex.text-end button:has-text("Approve")').first();
-  if (await btn.count() > 0) return { btn, why: '.d-flex.text-end' };
-
-  const section = oneClickSection(scope);
-  const area = (await section.count()) > 0 ? section : scope;
-
-  btn = area.locator('button.btn-white:has-text("Approve")').first();
-  if (await btn.count() > 0) return { btn, why: 'btn-white' };
-
-  btn = area.getByRole("button", { name: /^approve$/i }).first();
-  if (await btn.count() > 0) return { btn, why: 'role=button[name=Approve]' };
-
-  btn = area.locator('button:has-text("Approve")').first();
-  if (await btn.count() > 0) return { btn, why: 'button:has-text(Approve)' };
-
-  const txt = area.getByText(/^Approve\s*$/i).first();
-  if (await txt.count() > 0) {
-    const maybeBtn = txt.locator('xpath=ancestor::button[1]').first();
-    if (await maybeBtn.count() > 0) return { btn: maybeBtn, why: 'text->ancestor button' };
-    return { btn: txt, why: 'text-node only' }; // allerletzter Notnagel
+// Multi-Layer Finder: Button → Text-in-Button → Pure Text-Node
+async function findApproveTargets(scope) {
+  const targets = [];
+  
+  // LAYER 1: Präzise Button-Selektoren (aus Screenshot)
+  const selectors = [
+    { sel: scope.locator('.rounded-box-5 button.btn-white').filter({ hasText: /^approve$/i }), why: 'rounded-box + btn-white' },
+    { sel: scope.locator('#signals .d-flex.text-end button.btn-white').filter({ hasText: /^approve$/i }), why: '#signals path' },
+    { sel: scope.locator('button.btn-white').filter({ hasText: /^approve$/i }), why: 'btn-white' },
+  ];
+  
+  // 1-click trade Section
+  const section = scope.locator("section,div,article").filter({ hasText: /1[- ]?click trade/i }).first();
+  if (await section.count() > 0) {
+    selectors.push({ sel: section.locator('button').filter({ hasText: /^approve$/i }), why: '1-click-section button' });
   }
-
-  return { btn: area.locator('button:has-text("Approve")').first(), why: 'last-resort' };
+  
+  // Generic fallbacks
+  selectors.push(
+    { sel: scope.getByRole("button", { name: /^approve$/i }), why: 'role=button' },
+    { sel: scope.locator('button:has-text("Approve")'), why: 'button:has-text' }
+  );
+  
+  for (const { sel, why } of selectors) {
+    const count = await sel.count();
+    if (count > 0) {
+      for (let i = 0; i < count; i++) {
+        targets.push({ locator: sel.nth(i), why: `${why}[${i}]`, type: 'button' });
+      }
+    }
+  }
+  
+  // LAYER 2: Text-Node Fallback (wenn Button nicht klickbar)
+  const textNodes = await scope.getByText(/^Approve\s*$/i).all();
+  for (let i = 0; i < textNodes.length; i++) {
+    targets.push({ locator: textNodes[i], why: `text-node[${i}]`, type: 'text' });
+  }
+  
+  return targets;
 }
 
-async function clickSmart(page, btn) {
-  try { await btn.scrollIntoViewIfNeeded(); } catch {}
-  try { await btn.click({ timeout: 800 }); return 'dom-click'; } catch {}
-  try {
-    const el = await btn.elementHandle();
-    if (el) { await page.evaluate((node) => node.click(), el); return 'js-click'; }
+// BULLETPROOF Click: Mouse hat absolut Priorität (ignoriert alle Overlays)
+async function clickRobust(page, locator, type) {
+  try { 
+    await locator.scrollIntoViewIfNeeded({ timeout: 1000 }); 
   } catch {}
+  
+  // Warte auf Animationen
+  await page.waitForTimeout(400);
+  
+  let box = null;
   try {
-    const box = await btn.boundingBox();
-    if (box) { await page.mouse.click(box.x + box.width/2, box.y + box.height/2); return 'mouse-click'; }
+    box = await locator.boundingBox();
   } catch {}
+  
+  if (!box) {
+    logLine("⚠ No bounding box, trying element handle");
+    const el = await locator.elementHandle().catch(() => null);
+    if (el) {
+      box = await page.evaluate((node) => {
+        const rect = node.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      }, el).catch(() => null);
+    }
+  }
+  
+  // PRIO 1: MOUSE CLICK (ignoriert ALLES - Overlays, z-index, etc.)
+  if (box && box.width > 0 && box.height > 0) {
+    try {
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      
+      logLine(`🖱️ Mouse click at ${Math.round(x)},${Math.round(y)}`);
+      
+      await page.mouse.move(x, y);
+      await page.waitForTimeout(100);
+      await page.mouse.down();
+      await page.waitForTimeout(80);
+      await page.mouse.up();
+      await page.waitForTimeout(200);
+      
+      logLine("✓ mouse-click");
+      return 'mouse-click';
+    } catch (e) {
+      logLine("⚠ mouse-click failed:", e.message.slice(0, 80));
+    }
+  }
+  
+  // PRIO 2: Force Click (überspringt actionability checks)
+  try { 
+    await locator.click({ timeout: 1500, force: true, delay: 80 }); 
+    await page.waitForTimeout(200);
+    logLine("✓ force-click");
+    return 'force-click'; 
+  } catch (e) {
+    logLine("⚠ force-click failed:", e.message.slice(0, 80));
+  }
+  
+  // PRIO 3: JS Event Dispatch (für React/Vue)
+  try {
+    const el = await locator.elementHandle();
+    if (el) { 
+      await page.evaluate((node) => {
+        const rect = node.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        
+        ['mousedown', 'mouseup', 'click'].forEach(type => {
+          const evt = new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: x,
+            clientY: y
+          });
+          node.dispatchEvent(evt);
+        });
+        
+        node.click();
+      }, el);
+      await page.waitForTimeout(200);
+      logLine("✓ js-events");
+      return 'js-events'; 
+    }
+  } catch (e) {
+    logLine("⚠ js-events failed:", e.message.slice(0, 80));
+  }
+  
+  // PRIO 4: Normaler Click (falls alles andere fehlschlägt)
+  try { 
+    await locator.click({ timeout: 1000, delay: 80 }); 
+    await page.waitForTimeout(200);
+    logLine("✓ normal-click");
+    return 'normal-click'; 
+  } catch (e) {
+    logLine("⚠ normal-click failed:", e.message.slice(0, 80));
+  }
+  
+  // PRIO 5: Doppelklick (absolute Notlösung)
+  try { 
+    await locator.dblclick({ timeout: 1000, force: true, delay: 80 }); 
+    await page.waitForTimeout(200);
+    logLine("✓ dbl-click");
+    return 'dbl-click'; 
+  } catch (e) {
+    logLine("⚠ dbl-click failed:", e.message.slice(0, 80));
+  }
+  
   return null;
 }
 
-async function verifyApproved(page, btnBefore) {
+async function verifyApproved(page, targetBefore) {
   const started = Date.now();
-  const okToast = page.getByText(/approved|executed|success|done|trade (approved|executed)/i).first();
   const netRe = new RegExp(env.NET_OK_REGEX, "i");
   let via = null;
 
   while (Date.now() - started < env.POST_CLICK_VERIFY_MS) {
+    // 1. Success Toast/Message
     try {
-      if (await okToast.count()) { via = 'toast'; break; }
-    } catch {}
-
-    try {
-      const el = await btnBefore.elementHandle();
-      if (el) {
-        const disabled = await el.getAttribute("disabled");
-        if (disabled !== null) { via = 'disabled'; break; }
-        const text = (await el.textContent())?.trim() || "";
-        if (/^approved|processing|execut/i.test(text)) { via = 'text-change'; break; }
-      } else {
-        via = 'gone'; break; // Button aus DOM
+      const okMsg = page.locator('text=/approved|executed|success|processing|pending|confirmed|done/i').first();
+      if (await okMsg.count()) { 
+        const text = await okMsg.textContent().catch(() => "");
+        via = 'toast'; 
+        logLine(`✓ Success: "${text.trim().slice(0, 50)}"`);
+        break; 
       }
     } catch {}
 
-    const resp = await page.waitForResponse(r =>
-      netRe.test(r.url()) && r.request().method() !== 'OPTIONS' && r.ok(),
-      { timeout: 250 }
-    ).catch(()=>null);
-    if (resp) { via = 'net-ok'; break; }
+    // 2. Button-Zustand (nur wenn es ein Button war)
+    try {
+      const count = await targetBefore.count();
+      if (count === 0) { 
+        via = 'target-removed'; 
+        logLine("✓ Target removed from DOM");
+        break; 
+      }
+      
+      const el = await targetBefore.elementHandle();
+      if (!el) { 
+        via = 'target-gone'; 
+        logLine("✓ Target element gone");
+        break; 
+      }
+      
+      const tagName = await el.evaluate(node => node.tagName).catch(() => "");
+      if (tagName === "BUTTON") {
+        const disabled = await el.getAttribute("disabled");
+        if (disabled !== null) { 
+          via = 'disabled'; 
+          logLine("✓ Button disabled");
+          break; 
+        }
+        
+        const text = (await el.textContent())?.trim().toLowerCase() || "";
+        if (text !== "approve" && text !== "") {
+          via = 'text-changed'; 
+          logLine(`✓ Button text: "${text}"`);
+          break;
+        }
+        
+        if (Date.now() - started > 2000 && text === "approve") {
+          logLine(`⚠ Button still "Approve" after ${Math.round((Date.now() - started) / 1000)}s`);
+        }
+      }
+    } catch {}
 
-    await page.waitForTimeout(100);
+    // 3. Network Request
+    const resp = await page.waitForResponse(r => {
+      const url = r.url();
+      const method = r.request().method();
+      const match = netRe.test(url) && method !== 'OPTIONS';
+      if (match) {
+        const status = r.status();
+        logLine(`🌐 ${method} ${url.slice(0, 80)} → ${status}`);
+      }
+      return match && r.ok();
+    }, { timeout: 250 }).catch(() => null);
+    
+    if (resp) { 
+      via = 'net-ok'; 
+      break; 
+    }
+
+    await page.waitForTimeout(150);
   }
 
+  const elapsed = Date.now() - started;
   const ok = env.STRICT_VERIFY ? (via === 'net-ok') : !!via;
+  logLine(`Verify: ${ok ? '✅' : '❌'} via "${via || 'timeout'}" (${elapsed}ms)`);
+  
   return { ok, via: via || 'timeout' };
 }
 
 async function tryApproveOnDashboard(page) {
-  for (const scope of allScopes(page)) {
-    const { btn, why } = await findApproveInScope(scope);
-    if (await btn.count() === 0) continue;
-
-    const clickWay = await clickSmart(scope, btn);
-    logLine("clicked", { why, clickWay });
-
-    if (!clickWay) continue;
-
-    await maybeConfirm(scope);
-    await page.waitForTimeout(env.CLICK_WAIT_MS);
-
-    const verdict = await verifyApproved(scope, btn);
-    logLine("verify", verdict);
-
-    if (env.DEBUG_SHOTS) {
-      const base = path.join(DEBUG_DIR, `after-click-${Date.now()}-${verdict.ok ? 'OK' : 'NO'}`);
-      try {
-        await page.screenshot({ path: `${base}.png`, fullPage: true });
-        fs.writeFileSync(`${base}.html`, await page.content());
-      } catch {}
-    }
-
-    if (verdict.ok) return true;
-    // else: try other scopes/selectors
+  // Warte auf 1-click trade Section
+  try {
+    const section = page.locator('text=/1[- ]?click trade/i').first();
+    await section.waitFor({ state: 'visible', timeout: 4000 });
+    logLine("✓ 1-click trade visible");
+  } catch {
+    logLine("⚠ 1-click trade not found");
   }
+
+  // Kurze Pause für dynamische Inhalte
+  await page.waitForTimeout(600);
+
+  for (const scope of allScopes(page)) {
+    const targets = await findApproveTargets(scope);
+    
+    logLine(`Found ${targets.length} potential targets in scope`);
+    
+    if (targets.length === 0) continue;
+
+    for (const target of targets) {
+      const { locator, why, type } = target;
+      
+      logLine(`🎯 Trying: ${why} (${type})`);
+      
+      // Inspect target
+      try {
+        const isVisible = await locator.isVisible().catch(() => false);
+        const box = await locator.boundingBox().catch(() => null);
+        
+        logLine(`   visible=${isVisible}, box=${box ? `${Math.round(box.x)},${Math.round(box.y)}` : 'none'}`);
+        
+        if (!isVisible && !box) {
+          logLine("   ⚠ Not visible/clickable, skipping");
+          continue;
+        }
+      } catch (e) {
+        logLine("   ⚠ Inspection failed:", e.message.slice(0, 60));
+      }
+
+      // CLICK
+      const clickWay = await clickRobust(scope, locator, type);
+      
+      if (!clickWay) {
+        logLine("   ❌ All click methods failed");
+        continue;
+      }
+
+      // Check für Confirm-Dialog
+      await page.waitForTimeout(300);
+      await maybeConfirm(scope);
+      
+      // Warte vor Verify
+      await page.waitForTimeout(env.CLICK_WAIT_MS);
+
+      // VERIFY
+      const verdict = await verifyApproved(scope, locator);
+
+      // Debug-Screenshot
+      if (env.DEBUG_SHOTS) {
+        const base = path.join(DEBUG_DIR, `click-${Date.now()}-${verdict.ok ? 'OK' : 'FAIL'}`);
+        try {
+          await page.screenshot({ path: `${base}.png`, fullPage: true });
+          fs.writeFileSync(`${base}.html`, await page.content());
+          logLine(`📸 ${path.basename(base)}`);
+        } catch {}
+      }
+
+      if (verdict.ok) return true;
+      
+      logLine(`   ⚠ Verify failed (${verdict.via}), trying next target...`);
+    }
+  }
+  
   return false;
 }
 
@@ -315,15 +512,25 @@ async function approveOne(opts = { fast: true }) {
       if (!logged) return { ok:false, reason:"LOGIN_REQUIRED" };
 
       for (let i = 0; i < 5; i++) {
-        if (await tryApproveOnDashboard(page)) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
+        if (await tryApproveOnDashboard(page)) { 
+          approvesToday++; 
+          return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; 
+        }
 
         const bell = page.getByRole("button", { name: /notifications|bell/i }).first();
         if (await bell.count()) {
           await bell.click().catch(()=>{});
           await page.waitForTimeout(400);
-          if (await tryApproveOnDashboard(page)) { approvesToday++; return { ok:true, reason:"APPROVED_VIA_BELL" }; }
+          if (await tryApproveOnDashboard(page)) { 
+            approvesToday++; 
+            return { ok:true, reason:"APPROVED_VIA_BELL" }; 
+          }
         }
-        await page.reload({ waitUntil: "networkidle" }).catch(()=>{});
+        
+        if (i < 4) {
+          logLine(`Reload attempt ${i + 1}/5`);
+          await page.reload({ waitUntil: "networkidle" }).catch(()=>{});
+        }
       }
 
       if (env.DEBUG_SHOTS) {
@@ -366,7 +573,7 @@ function scheduleNextHeartbeat() {
 }
 
 // Reset Tageszähler
-cron.schedule("0 0 * * *", () => { approvesToday = 0; }, { timezone: "UTC" });
+cron.schedule("0 0 * * *", () => { approvesToday = 0; logLine("📅 Daily counter reset"); }, { timezone: "UTC" });
 
 // ---------- HTTP ----------
 const app = express();
@@ -395,24 +602,40 @@ app.get("/login-status", checkAuth, async (_req,res)=>{
 app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
-  hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`
+  hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`,
+  approvesToday
 }));
 
 // Webhook vom Forwarder (antwortet sofort; arbeitet dann async)
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
-  try { const msg = (req.body && req.body.message) ? String(req.body.message) : ""; logLine("Signal received:", msg.slice(0, 160)); } catch {}
+  try { 
+    const msg = (req.body && req.body.message) ? String(req.body.message) : ""; 
+    logLine("📨 Signal received:", msg.slice(0, 160)); 
+  } catch {}
   res.json({ ok: true, queued: true });
 
-  let rFast = null;
-  try { rFast = await approveOne({ fast: true }); logLine("approve-async fast:", rFast); } catch (e) { logLine("approve-async fast error:", e.message); }
-  if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
-    try { const r2 = await approveOne({ fast: false }); logLine("approve-async fallback:", r2); } catch (e) { logLine("approve-async fallback error:", e.message); }
-  }
+  (async () => {
+    let rFast = null;
+    try { 
+      rFast = await approveOne({ fast: true }); 
+      logLine("approve-async fast:", rFast); 
+    } catch (e) { 
+      logLine("approve-async fast error:", e.message); 
+    }
+    
+    if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
+      try { 
+        const r2 = await approveOne({ fast: false }); 
+        logLine("approve-async fallback:", r2); 
+      } catch (e) { 
+        logLine("approve-async fallback error:", e.message); 
+      }
+    }
+  })();
 });
 
 // ---------- DEBUG ENDPOINTS ----------
 
-// sofortiger Snapshot (PNG + HTML)
 app.post("/debug/snap", checkAuth, async (_req, res) => {
   try {
     const out = await withCtx(async (page) => {
@@ -429,7 +652,6 @@ app.post("/debug/snap", checkAuth, async (_req, res) => {
   }
 });
 
-// Selector-Probe: Trefferzahlen in allen Frames
 app.get("/debug/probe", checkAuth, async (_req, res) => {
   try {
     const out = await withCtx(async (page) => {
@@ -437,12 +659,13 @@ app.get("/debug/probe", checkAuth, async (_req, res) => {
       await dismissOverlays(page).catch(()=>{});
       const data = [];
       for (const fr of allScopes(page)) {
-        const url = fr.url ? fr.url() : "frame";
+        const url = fr.url ? fr.url() : "main-page";
         const counts = {};
-        counts.btnWhite  = await fr.locator('button.btn-white:has-text("Approve")').count();
-        counts.role      = await fr.getByRole("button", { name: /^approve$/i }).count();
-        counts.textBtn   = await fr.locator('button:has-text("Approve")').count();
-        counts.exactText = await fr.getByText(/^Approve\s*$/i).count();
+        counts.roundedBox = await fr.locator('.rounded-box-5 button.btn-white').filter({ hasText: /approve/i }).count();
+        counts.signals = await fr.locator('#signals button').filter({ hasText: /approve/i }).count();
+        counts.btnWhite = await fr.locator('button.btn-white').filter({ hasText: /approve/i }).count();
+        counts.roleButton = await fr.getByRole("button", { name: /^approve$/i }).count();
+        counts.textNodes = await fr.getByText(/^Approve\s*$/i).count();
         data.push({ frameUrl: url, counts });
       }
       return data;
@@ -453,20 +676,63 @@ app.get("/debug/probe", checkAuth, async (_req, res) => {
   }
 });
 
-// Liste Debug-Dateien
+app.get("/debug/button-inspect", checkAuth, async (_req, res) => {
+  try {
+    const out = await withCtx(async (page) => {
+      await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
+      await dismissOverlays(page).catch(()=>{});
+      
+      const results = [];
+      for (const scope of allScopes(page)) {
+        const targets = await findApproveTargets(scope);
+        
+        for (const { locator, why, type } of targets) {
+          const el = await locator.elementHandle().catch(() => null);
+          if (!el) continue;
+          
+          const details = await page.evaluate((node) => {
+            const rect = node.getBoundingClientRect();
+            const styles = window.getComputedStyle(node);
+            return {
+              text: node.textContent.trim(),
+              tagName: node.tagName,
+              classes: node.className,
+              id: node.id,
+              disabled: node.disabled,
+              visible: styles.visibility !== 'hidden' && styles.display !== 'none',
+              opacity: styles.opacity,
+              zIndex: styles.zIndex,
+              pointerEvents: styles.pointerEvents,
+              position: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+              inViewport: rect.top >= 0 && rect.bottom <= window.innerHeight,
+            };
+          }, el).catch(() => ({}));
+          
+          results.push({ selector: why, type, ...details });
+        }
+      }
+      
+      return results;
+    });
+    res.json({ ok: true, buttons: out });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/debug/shots", checkAuth, (_req, res) => {
   try {
     const files = fs.readdirSync(DEBUG_DIR)
       .filter(f => f.endsWith(".png") || f.endsWith(".html"))
       .map(f => ({ name: f, mtime: fs.statSync(path.join(DEBUG_DIR, f)).mtimeMs }))
-      .sort((a,b) => b.mtime - a.mtime);
+      .sort((a,b) => b.mtime - a.mtime)
+      .slice(0, 50);
     res.json({ ok:true, dir:"/debug", files });
   } catch (e) {
     res.status(500).json({ ok:false, error:e.message });
   }
 });
 
-// Einzelne Debug-Datei
 app.get("/debug/file/:name", checkAuth, (req, res) => {
   try {
     const safe = (req.params.name || "").replace(/[^a-zA-Z0-9._-]/g, "");
@@ -479,13 +745,15 @@ app.get("/debug/file/:name", checkAuth, (req, res) => {
   }
 });
 
-// Tail der In-Memory-Logs
 app.get("/debug/logs", checkAuth, (_req, res) => {
   res.json({ ok:true, lines: LOG_RING.slice(-300) });
 });
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`Approver Service up on ${env.PORT} | window ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
+  logLine(`🚀 Approver Service up on port ${env.PORT}`);
+  logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
+  logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`);
+  logLine(`🎯 Click strategy: Mouse-first (overlay-proof) + text-fallback`);
   scheduleNextHeartbeat();
 });

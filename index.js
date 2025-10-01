@@ -1,4 +1,4 @@
-// index.js — A1 Approver (Playwright) + GUARANTEED REFRESH + MAX_AGE + BULLETPROOF CLICK
+// index.js — A1 Approver (Playwright) + GUARANTEED REFRESH + MAX_AGE + BULLETPROOF CLICK + NUCLEAR OVERLAY KILLER
 
 import express from "express";
 import cron from "node-cron";
@@ -24,7 +24,7 @@ const env = {
 
   // Limits / Tuning
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
-  MAX_AGE_SEC: Number(process.env.MAX_AGE_SEC || "10"), // ← NEU: Max Sekunden seit Signal
+  MAX_AGE_SEC: Number(process.env.MAX_AGE_SEC || "10"),
   FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1200"),
   CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "1000"),
   POST_CLICK_VERIFY_MS: Number(process.env.POST_CLICK_VERIFY_MS || "3000"),
@@ -32,11 +32,11 @@ const env = {
   // AlgosOne
   DASH_URL: process.env.DASH_URL || "https://app.algosone.ai/dashboard",
   LOGIN_URL: process.env.LOGIN_URL || "https://app.algosone.ai/login",
-  LOGIN_METHOD: (process.env.LOGIN_METHOD || "password").toLowerCase(), // "password" | "google"
+  LOGIN_METHOD: (process.env.LOGIN_METHOD || "password").toLowerCase(),
   EMAIL: process.env.EMAIL || "",
   PASSWORD: process.env.PASSWORD || "",
 
-  // HTTP-Auth (auch für Debug)
+  // HTTP-Auth
   AUTH_TOKEN: process.env.AUTH_TOKEN || "",
 
   // Debug
@@ -102,19 +102,127 @@ async function withCtx(fn) {
   }
 }
 
-// ---------- Overlays / Confirm ----------
+// ---------- NUCLEAR OVERLAY KILLER ----------
 async function dismissOverlays(page) {
-  const candidates = [
+  // LAYER 0: AlgosOne Cookie Policy (der aus dem Screenshot!)
+  try {
+    const hasCookiePolicy = await page.locator('text="COOKIE POLICY"').count() > 0;
+    if (hasCookiePolicy) {
+      logLine("🍪 Cookie Policy detected! KILLING...");
+      
+      // 1. Back Button
+      const backBtn = page.getByRole("button", { name: /back/i }).first();
+      if (await backBtn.count() > 0) {
+        await backBtn.click({ timeout: 800 }).catch(() => {});
+        logLine("✓ Clicked Back button");
+      }
+      
+      // 2. Escape
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(100);
+      
+      // 3. Nuclear: Remove via JS
+      await page.evaluate(() => {
+        const dialogs = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="dialog"]');
+        dialogs.forEach(d => {
+          if (d.textContent && d.textContent.includes('COOKIE POLICY')) {
+            d.remove();
+          }
+        });
+      }).catch(() => {});
+      
+      await page.waitForTimeout(200);
+      logLine("✓ Cookie Policy killed");
+    }
+  } catch (e) {
+    logLine("Cookie Policy kill error:", e.message.slice(0, 60));
+  }
+
+  // LAYER 1: Standard Cookie Banners
+  const standardCookies = [
     page.getByRole("button", { name: /accept all|accept|agree|got it|okay|ok|verstanden|zustimmen/i }).first(),
     page.locator('button:has-text("Accept")').first(),
     page.locator('button:has-text("I Agree")').first(),
-    page.getByRole("button", { name: /close|schließen|dismiss/i }).first(),
-    page.locator('[data-testid="cookie-policy-link"]').first()
   ];
-  for (const c of candidates) {
-    try { if (await c.count() > 0) { await c.click({ timeout: 800 }).catch(()=>{}); await page.waitForTimeout(80);} } catch {}
+  
+  for (const btn of standardCookies) {
+    try {
+      if (await btn.count() > 0) {
+        await btn.click({ timeout: 800 }).catch(() => {});
+        await page.waitForTimeout(100);
+      }
+    } catch {}
+  }
+
+  // LAYER 2: Generic Dialogs
+  try {
+    const dialogs = await page.locator('[role="dialog"], .modal, .popup').all();
+    
+    for (const dialog of dialogs) {
+      try {
+        const isVisible = await dialog.isVisible().catch(() => false);
+        if (!isVisible) continue;
+        
+        // Try close button
+        const closeBtn = dialog.locator('button:has-text("×"), button:has-text("Close"), [aria-label="Close"]').first();
+        if (await closeBtn.count() > 0) {
+          await closeBtn.click({ timeout: 500 }).catch(() => {});
+        } else {
+          // Nuclear: Remove dialog
+          await dialog.evaluate(el => el.remove()).catch(() => {});
+        }
+      } catch {}
+    }
+  } catch {}
+
+  // LAYER 3: NUCLEAR - Remove ALL high z-index overlays
+  try {
+    const removed = await page.evaluate(() => {
+      let count = 0;
+      
+      // Find all elements with high z-index
+      const allElements = Array.from(document.querySelectorAll('*'));
+      const highZIndexElements = allElements.filter(el => {
+        const style = window.getComputedStyle(el);
+        const z = parseInt(style.zIndex);
+        const pos = style.position;
+        
+        // High z-index + positioned = likely overlay
+        return !isNaN(z) && z > 500 && (pos === 'fixed' || pos === 'absolute');
+      });
+      
+      highZIndexElements.forEach(el => {
+        // Check if it's covering significant viewport
+        const rect = el.getBoundingClientRect();
+        const coversScreen = rect.width > window.innerWidth * 0.5 || rect.height > window.innerHeight * 0.5;
+        
+        if (coversScreen) {
+          el.remove();
+          count++;
+        }
+      });
+      
+      // Also remove backdrop elements
+      const backdrops = document.querySelectorAll('.backdrop, .overlay, [class*="backdrop"], [class*="overlay"]');
+      backdrops.forEach(b => {
+        const style = window.getComputedStyle(b);
+        if (parseInt(style.zIndex) > 100) {
+          b.remove();
+          count++;
+        }
+      });
+      
+      return count;
+    }).catch(() => 0);
+    
+    if (removed > 0) {
+      logLine(`🗑️ Nuclear removal: ${removed} overlay elements`);
+    }
+  } catch (e) {
+    logLine("Nuclear overlay removal error:", e.message.slice(0, 60));
   }
 }
+
 async function maybeConfirm(page) {
   const dlg = page.getByRole("dialog");
   if (await dlg.count() === 0) return;
@@ -165,27 +273,24 @@ async function ensureOnDashboard(page) {
   return !onLoginUrl(page);
 }
 
-// ---------- Approve (BULLETPROOF: Mouse-First + Text-Fallback + Guaranteed Refresh) ----------
+// ---------- Approve ----------
 function allScopes(page) { return [page, ...page.frames()]; }
 
-// Multi-Layer Finder: Button → Text-in-Button → Pure Text-Node
 async function findApproveTargets(scope) {
   const targets = [];
   
-  // LAYER 1: Präzise Button-Selektoren (aus Screenshot)
+  // LAYER 1: Präzise Button-Selektoren
   const selectors = [
     { sel: scope.locator('.rounded-box-5 button.btn-white').filter({ hasText: /^approve$/i }), why: 'rounded-box + btn-white' },
     { sel: scope.locator('#signals .d-flex.text-end button.btn-white').filter({ hasText: /^approve$/i }), why: '#signals path' },
     { sel: scope.locator('button.btn-white').filter({ hasText: /^approve$/i }), why: 'btn-white' },
   ];
   
-  // 1-click trade Section
   const section = scope.locator("section,div,article").filter({ hasText: /1[- ]?click trade/i }).first();
   if (await section.count() > 0) {
     selectors.push({ sel: section.locator('button').filter({ hasText: /^approve$/i }), why: '1-click-section button' });
   }
   
-  // Generic fallbacks
   selectors.push(
     { sel: scope.getByRole("button", { name: /^approve$/i }), why: 'role=button' },
     { sel: scope.locator('button:has-text("Approve")'), why: 'button:has-text' }
@@ -200,7 +305,7 @@ async function findApproveTargets(scope) {
     }
   }
   
-  // LAYER 2: Text-Node Fallback (wenn Button nicht klickbar)
+  // LAYER 2: Text-Node Fallback
   const textNodes = await scope.getByText(/^Approve\s*$/i).all();
   for (let i = 0; i < textNodes.length; i++) {
     targets.push({ locator: textNodes[i], why: `text-node[${i}]`, type: 'text' });
@@ -209,13 +314,11 @@ async function findApproveTargets(scope) {
   return targets;
 }
 
-// BULLETPROOF Click: Mouse hat absolut Priorität (ignoriert alle Overlays)
 async function clickRobust(page, locator, type) {
   try { 
     await locator.scrollIntoViewIfNeeded({ timeout: 1000 }); 
   } catch {}
   
-  // Warte auf Animationen
   await page.waitForTimeout(200);
   
   let box = null;
@@ -233,13 +336,22 @@ async function clickRobust(page, locator, type) {
     }
   }
   
-  // PRIO 1: MOUSE CLICK (ignoriert ALLES)
+  // PRIO 1: MOUSE CLICK (ignores ALL overlays)
   if (box && box.width > 0 && box.height > 0) {
     try {
       const x = box.x + box.width / 2;
       const y = box.y + box.height / 2;
       
       logLine(`🖱️ Mouse click at ${Math.round(x)},${Math.round(y)}`);
+      
+      // FORCE: Hide ALL overlays right before click
+      await page.evaluate(() => {
+        const highZ = Array.from(document.querySelectorAll('*')).filter(el => {
+          const z = parseInt(window.getComputedStyle(el).zIndex);
+          return !isNaN(z) && z > 900; // Very high z-index
+        });
+        highZ.forEach(el => el.style.display = 'none');
+      }).catch(() => {});
       
       await page.mouse.move(x, y);
       await page.waitForTimeout(80);
@@ -248,7 +360,7 @@ async function clickRobust(page, locator, type) {
       await page.mouse.up();
       await page.waitForTimeout(150);
       
-      logLine("✓ mouse-click");
+      logLine("✓ mouse-click (overlays hidden)");
       return 'mouse-click';
     } catch (e) {
       logLine("⚠ mouse-click failed:", e.message.slice(0, 80));
@@ -295,7 +407,7 @@ async function clickRobust(page, locator, type) {
     logLine("⚠ js-events failed:", e.message.slice(0, 80));
   }
   
-  // PRIO 4: Normaler Click
+  // PRIO 4: Normal Click
   try { 
     await locator.click({ timeout: 1000, delay: 80 }); 
     await page.waitForTimeout(150);
@@ -324,7 +436,7 @@ async function verifyApproved(page, targetBefore) {
   let via = null;
 
   while (Date.now() - started < env.POST_CLICK_VERIFY_MS) {
-    // 1. Success Toast/Message
+    // 1. Success Toast
     try {
       const okMsg = page.locator('text=/approved|executed|success|processing|pending|confirmed|done/i').first();
       if (await okMsg.count()) { 
@@ -335,19 +447,19 @@ async function verifyApproved(page, targetBefore) {
       }
     } catch {}
 
-    // 2. Button-Zustand
+    // 2. Button State
     try {
       const count = await targetBefore.count();
       if (count === 0) { 
         via = 'target-removed'; 
-        logLine("✓ Target removed from DOM");
+        logLine("✓ Target removed");
         break; 
       }
       
       const el = await targetBefore.elementHandle();
       if (!el) { 
         via = 'target-gone'; 
-        logLine("✓ Target element gone");
+        logLine("✓ Target gone");
         break; 
       }
       
@@ -366,21 +478,16 @@ async function verifyApproved(page, targetBefore) {
           logLine(`✓ Button text: "${text}"`);
           break;
         }
-        
-        if (Date.now() - started > 2000 && text === "approve") {
-          logLine(`⚠ Button still "Approve" after ${Math.round((Date.now() - started) / 1000)}s`);
-        }
       }
     } catch {}
 
-    // 3. Network Request
+    // 3. Network
     const resp = await page.waitForResponse(r => {
       const url = r.url();
       const method = r.request().method();
       const match = netRe.test(url) && method !== 'OPTIONS';
       if (match) {
-        const status = r.status();
-        logLine(`🌐 ${method} ${url.slice(0, 80)} → ${status}`);
+        logLine(`🌐 ${method} ${url.slice(0, 80)} → ${r.status()}`);
       }
       return match && r.ok();
     }, { timeout: 250 }).catch(() => null);
@@ -403,6 +510,30 @@ async function verifyApproved(page, targetBefore) {
 async function tryApproveOnDashboard(page) {
   await page.waitForTimeout(300);
 
+  // DEBUG: Screenshot BEFORE overlay removal
+  if (env.DEBUG_SHOTS) {
+    try {
+      await page.screenshot({ 
+        path: path.join(DEBUG_DIR, `before-dismiss-${Date.now()}.png`),
+        fullPage: true 
+      });
+    } catch {}
+  }
+
+  // KILL ALL OVERLAYS
+  await dismissOverlays(page);
+  await page.waitForTimeout(200);
+
+  // DEBUG: Screenshot AFTER overlay removal
+  if (env.DEBUG_SHOTS) {
+    try {
+      await page.screenshot({ 
+        path: path.join(DEBUG_DIR, `after-dismiss-${Date.now()}.png`),
+        fullPage: true 
+      });
+    } catch {}
+  }
+
   for (const scope of allScopes(page)) {
     const targets = await findApproveTargets(scope);
     
@@ -422,7 +553,7 @@ async function tryApproveOnDashboard(page) {
         logLine(`   visible=${isVisible}, box=${box ? `${Math.round(box.x)},${Math.round(box.y)}` : 'none'}`);
         
         if (!isVisible && !box) {
-          logLine("   ⚠ Not visible/clickable, skipping");
+          logLine("   ⚠ Not visible, skipping");
           continue;
         }
       } catch (e) {
@@ -453,24 +584,20 @@ async function tryApproveOnDashboard(page) {
 
       if (verdict.ok) return true;
       
-      logLine(`   ⚠ Verify failed (${verdict.via}), trying next target...`);
+      logLine(`   ⚠ Verify failed (${verdict.via}), trying next...`);
     }
   }
   
   return false;
 }
 
-/**
- * approveOne({ fast:true, signalTime: Date.now() })
- */
 async function approveOne(opts = { fast: true, signalTime: null }) {
-  // Check MAX_AGE
   if (opts.signalTime) {
     const ageMs = Date.now() - opts.signalTime;
     const ageSec = Math.round(ageMs / 1000);
     
     if (ageSec > env.MAX_AGE_SEC) {
-      logLine(`⏰ Signal too old: ${ageSec}s > ${env.MAX_AGE_SEC}s MAX_AGE`);
+      logLine(`⏰ Signal too old: ${ageSec}s > ${env.MAX_AGE_SEC}s`);
       return { ok: false, reason: "SIGNAL_TOO_OLD", ageSec };
     }
     
@@ -485,15 +612,13 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
   try {
     return await withCtx(async (page) => {
       if (opts.fast) {
-        // LOAD
         await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS });
         await dismissOverlays(page).catch(()=>{});
         logLine(`[${ts()} fast] url=`, page.url());
         
         if (onLoginUrl(page)) return { ok:false, reason:"LOGIN_REQUIRED" };
 
-        // GUARANTEED REFRESH (Button kommt IMMER erst danach)
-        logLine("🔄 Guaranteed refresh (button always appears after)");
+        logLine("🔄 Guaranteed refresh");
         await page.reload({ waitUntil: "domcontentloaded", timeout: 2500 });
         await dismissOverlays(page).catch(()=>{});
         await page.waitForTimeout(300);
@@ -514,7 +639,7 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         return { ok:false, reason:"NO_BUTTON" };
       }
 
-      // SLOW MODE: Login + multiple Reloads
+      // SLOW MODE
       const logged = await ensureOnDashboard(page);
       if (!logged) return { ok:false, reason:"LOGIN_REQUIRED" };
 
@@ -558,15 +683,15 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
   }
 }
 
-// ---------- Heartbeat (random 5–8 min) ----------
+// ---------- Heartbeat ----------
 const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 async function heartbeat(){
   if (!inWindow()) return;
   try {
     await withCtx(async (page) => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
-      if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) await ensureOnDashboard(page).catch(()=>{});
       await dismissOverlays(page).catch(()=>{});
+      if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) await ensureOnDashboard(page).catch(()=>{});
     });
     logLine("🔄 Heartbeat OK");
   } catch(e){ logLine("Heartbeat ERR:", e.message); }
@@ -580,7 +705,6 @@ function scheduleNextHeartbeat() {
   setTimeout(async () => { await heartbeat(); scheduleNextHeartbeat(); }, delay);
 }
 
-// Reset Tageszähler
 cron.schedule("0 0 * * *", () => { approvesToday = 0; logLine("📅 Daily counter reset"); }, { timezone: "UTC" });
 
 // ---------- HTTP ----------
@@ -615,9 +739,8 @@ app.get("/health", (_req,res)=> res.json({
   approvesToday
 }));
 
-// Webhook vom Forwarder (antwortet sofort; arbeitet dann async)
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
-  const signalTime = Date.now(); // Timestamp beim Empfang
+  const signalTime = Date.now();
   
   try { 
     const msg = (req.body && req.body.message) ? String(req.body.message) : ""; 
@@ -635,17 +758,15 @@ app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (re
       logLine("approve-async fast error:", e.message); 
     }
     
-    // Fallback nur wenn nicht zu alt UND kein Button gefunden
     if (rFast && rFast.reason === "SIGNAL_TOO_OLD") {
-      logLine("⏰ Skipping fallback (signal too old)");
+      logLine("⏰ Skipping fallback (too old)");
       return;
     }
     
     if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
-      // Check Age nochmal vor Fallback
       const ageSec = Math.round((Date.now() - signalTime) / 1000);
       if (ageSec > env.MAX_AGE_SEC) {
-        logLine(`⏰ Skipping fallback (age ${ageSec}s > ${env.MAX_AGE_SEC}s)`);
+        logLine(`⏰ Skipping fallback (age ${ageSec}s)`);
         return;
       }
       
@@ -659,8 +780,7 @@ app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (re
   })();
 });
 
-// ---------- DEBUG ENDPOINTS ----------
-
+// ---------- DEBUG ----------
 app.post("/debug/snap", checkAuth, async (_req, res) => {
   try {
     const out = await withCtx(async (page) => {
@@ -780,6 +900,6 @@ app.listen(Number(env.PORT), () => {
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`);
   logLine(`⏱️ Max signal age: ${env.MAX_AGE_SEC}s`);
-  logLine(`🎯 Strategy: Guaranteed refresh + mouse-first click`);
+  logLine(`🎯 Strategy: Nuclear overlay killer + guaranteed refresh + mouse-first`);
   scheduleNextHeartbeat();
 });

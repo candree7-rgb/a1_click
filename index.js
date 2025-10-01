@@ -1,4 +1,4 @@
-// index.js — A1 Approver (Playwright) + robustes Klicken + Debug
+// index.js — A1 Approver (Playwright) + robust click + hybrid selectors + debug
 
 import express from "express";
 import cron from "node-cron";
@@ -159,54 +159,52 @@ async function ensureOnDashboard(page) {
   return !onLoginUrl(page);
 }
 
-// ---------- Approve (smart & schnell) ----------
+// ---------- Approve (hybrid finder + robust click) ----------
 function oneClickSection(scope) {
   return scope.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
 }
-
 function allScopes(page) {
   const frames = page.frames();
-  // Hauptseite zuerst, dann Unterframes
   return [page, ...frames];
 }
 
+// Hybrid: erst superspezifisch (#signals, .d-flex.text-end), dann 1-click-Bereich, dann generische Fallbacks
 async function findApproveInScope(scope) {
-  // 0) Sehr präzise: innerhalb #signals
   let btn = scope.locator('#signals button:has-text("Approve")').first();
   if (await btn.count() > 0) return btn;
 
-  // 0b) Innerhalb d-flex text-end (dein Screenshot)
   btn = scope.locator('.d-flex.text-end button:has-text("Approve")').first();
   if (await btn.count() > 0) return btn;
 
-  // 1) Weißer Button mit Text
   const section = oneClickSection(scope);
   const area = (await section.count()) > 0 ? section : scope;
-  btn = area.locator('button.btn.btn-white:has-text("Approve")').first();
+
+  btn = area.locator('button.btn-white:has-text("Approve")').first();
   if (await btn.count() > 0) return btn;
 
-  // 2) Role + exakter Name
   btn = area.getByRole("button", { name: /^approve$/i }).first();
   if (await btn.count() > 0) return btn;
 
-  // 3) normaler Text-Button
   btn = area.locator('button:has-text("Approve")').first();
   if (await btn.count() > 0) return btn;
 
-  // 4) exakter Text (Notnagel)
-  btn = area.getByText(/^Approve\s*$/i).first();
-  return btn;
+  const txt = area.getByText(/^Approve\s*$/i).first();
+  if (await txt.count() > 0) {
+    const maybeBtn = txt.locator('xpath=ancestor::button[1]').first();
+    if (await maybeBtn.count() > 0) return maybeBtn;
+    return txt; // allerletzter Notnagel
+  }
+
+  return area.locator('button:has-text("Approve")').first();
 }
 
 async function clickSmart(page, btn) {
   try { await btn.scrollIntoViewIfNeeded(); } catch {}
   try { await btn.click({ timeout: 800 }); return true; } catch {}
-  // JS-Click
   try {
     const el = await btn.elementHandle();
     if (el) { await page.evaluate((node) => node.click(), el); return true; }
   } catch {}
-  // Maus-Fallback
   try {
     const box = await btn.boundingBox();
     if (box) { await page.mouse.click(box.x + box.width/2, box.y + box.height/2); return true; }
@@ -216,20 +214,11 @@ async function clickSmart(page, btn) {
 
 async function verifyApproved(page, btnBefore) {
   const started = Date.now();
-
-  // Success-Kriterien:
-  //  A) Toast/Snackbar mit Erfolg
-  //  B) Button verschwindet / wird disabled / Text ändert sich (Approved/Processing)
-  //  C) Netzwerk-Response (best effort) mit approve im Pfad und ok()
   const okToast = page.getByText(/approved|executed|success|done|trade (approved|executed)/i).first();
 
   while (Date.now() - started < env.POST_CLICK_VERIFY_MS) {
-    // A) Toast
-    try {
-      if (await okToast.count()) return true;
-    } catch {}
+    try { if (await okToast.count()) return true; } catch {}
 
-    // B) Button-State
     try {
       const el = await btnBefore.elementHandle();
       if (el) {
@@ -238,12 +227,10 @@ async function verifyApproved(page, btnBefore) {
         const text = (await el.textContent())?.trim() || "";
         if (/^approved|processing|execut/i.test(text)) return true;
       } else {
-        // Button nicht mehr im DOM
-        return true;
+        return true; // Button aus DOM verschwunden
       }
     } catch {}
 
-    // C) Netzwerk
     try {
       const resp = await page.waitForResponse(r =>
         /approve/i.test(r.url()) && r.ok(),
@@ -258,7 +245,6 @@ async function verifyApproved(page, btnBefore) {
 }
 
 async function tryApproveOnDashboard(page) {
-  // Suche in allen Frames
   for (const scope of allScopes(page)) {
     const btn = await findApproveInScope(scope);
     if (await btn.count() === 0) continue;
@@ -272,7 +258,6 @@ async function tryApproveOnDashboard(page) {
     const ok = await verifyApproved(scope, btn);
     if (ok) return true;
 
-    // Debug falls Klick wirkungslos
     if (env.DEBUG_SHOTS) {
       const base = path.join(DEBUG_DIR, `post-click-no-change-${Date.now()}`);
       try {
@@ -435,7 +420,7 @@ app.post("/debug/snap", checkAuth, async (_req, res) => {
   }
 });
 
-// Selector-Probe: Wie viele „Approve“-Treffer in allen Frames?
+// Selector-Probe: Trefferzahlen in allen Frames
 app.get("/debug/probe", checkAuth, async (_req, res) => {
   try {
     const out = await withCtx(async (page) => {
@@ -486,7 +471,6 @@ app.get("/debug/file/:name", checkAuth, (req, res) => {
 });
 
 // ---------- Start ----------
-const app = express();
 app.listen(Number(env.PORT), () => {
   console.log(`Approver Service up on ${env.PORT} | window ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   scheduleNextHeartbeat();

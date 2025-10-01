@@ -1,9 +1,10 @@
-// index.js — A1 Approver (Playwright)
+// index.js — A1 Approver (Playwright) + Debug-Endpoints
 
 // ---------- Imports ----------
 import express from "express";
 import cron from "node-cron";
 import fs from "fs";
+import path from "path";
 import { chromium } from "playwright";
 
 // ---------- ENV ----------
@@ -11,17 +12,17 @@ const env = {
   PORT: process.env.PORT || "8080",
 
   // Betriebsfenster (UTC)
-  WINDOW_START: process.env.WINDOW_START || "08:00",
-  WINDOW_END: process.env.WINDOW_END || "20:30",
+  WINDOW_START: process.env.WINDOW_START || "00:00",
+  WINDOW_END: process.env.WINDOW_END || "23:59",
 
-  // Random Heartbeat im Fenster (statt fixem Intervall)
+  // Random Heartbeat (statt fixem Intervall)
   HEARTBEAT_MIN_MIN: Number(process.env.HEARTBEAT_MIN_MIN || "7"),
   HEARTBEAT_MAX_MIN: Number(process.env.HEARTBEAT_MAX_MIN || "12"),
 
   // Limits / Tuning
   MAX_PER_DAY: Number(process.env.MAX_PER_DAY || "999999"),
-  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),  // superschnelles Laden
-  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "900"), // kurze Pause nach Klick
+  FAST_LOAD_MS: Number(process.env.FAST_LOAD_MS || "1500"),
+  CLICK_WAIT_MS: Number(process.env.CLICK_WAIT_MS || "900"),
 
   // AlgosOne
   DASH_URL: process.env.DASH_URL || "https://app.algosone.ai/dashboard",
@@ -30,17 +31,23 @@ const env = {
   EMAIL: process.env.EMAIL || "",
   PASSWORD: process.env.PASSWORD || "",
 
-  // HTTP-Auth (optional)
+  // HTTP-Auth (auch für Debug)
   AUTH_TOKEN: process.env.AUTH_TOKEN || "",
 
   // Debug (optional)
-  DEBUG_SHOTS: /^true$/i.test(process.env.DEBUG_SHOTS || ""),
+  DEBUG_SHOTS: /^true$/i.test(process.env.DEBUG_SHOTS || ""), // Dateien speichern?
   DEBUG_TRACE: /^true$/i.test(process.env.DEBUG_TRACE || ""),
 };
 
 const STORAGE_PATH = "/app/storageState.json";
 const DESKTOP_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
+
+// Ordner für Debug-Files
+const DEBUG_DIR = "/app/debug";
+if (!fs.existsSync(DEBUG_DIR)) {
+  try { fs.mkdirSync(DEBUG_DIR, { recursive: true }); } catch {}
+}
 
 // ---------- State ----------
 let approvesToday = 0;
@@ -52,19 +59,7 @@ const inWindow = () => {
   const d = new Date(); const cur = d.getUTCHours()*60 + d.getUTCMinutes();
   return cur >= toMin(env.WINDOW_START) && cur <= toMin(env.WINDOW_END);
 };
-const nowUtcMin = () => { const d=new Date(); return d.getUTCHours()*60 + d.getUTCMinutes(); };
-const minutesUntilWindowStart = () => {
-  const now = nowUtcMin();
-  const start = toMin(env.WINDOW_START);
-  const end   = toMin(env.WINDOW_END);
-  if (now < start) return start - now;           // später heute
-  if (now > end)   return (24*60 - now) + start; // morgen
-  return 0; // bereits im Fenster
-};
-
-const onLoginUrl = (page) =>
-  /app\.algosone\.ai\/login/i.test(page.url()) || /accounts\.google\.com/i.test(page.url());
-const logHere = (page, tag) => console.log(`[${tag}] url= ${page.url()}`);
+const onLoginUrl = (page) => /app\.algosone\.ai\/login/i.test(page.url()) || /accounts\.google\.com/i.test(page.url());
 
 // ---------- Singleton Browser / Context ----------
 let browserP = null;
@@ -108,22 +103,14 @@ async function dismissOverlays(page) {
     page.locator('[data-testid="cookie-policy-link"]').first()
   ];
   for (const c of candidates) {
-    try {
-      if (await c.count() > 0) {
-        await c.click({ timeout: 800 }).catch(()=>{});
-        await page.waitForTimeout(80);
-      }
-    } catch {}
+    try { if (await c.count() > 0) { await c.click({ timeout: 800 }).catch(()=>{}); await page.waitForTimeout(80);} } catch {}
   }
 }
 async function maybeConfirm(page) {
   const dlg = page.getByRole("dialog");
   if (await dlg.count() === 0) return;
   const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok|continue)$/i }).first();
-  if (await btn.count() > 0) {
-    await btn.click().catch(()=>{});
-    await page.waitForTimeout(150);
-  }
+  if (await btn.count() > 0) { await btn.click().catch(()=>{}); await page.waitForTimeout(150); }
 }
 
 // ---------- Login ----------
@@ -171,7 +158,8 @@ function oneClickSection(page) {
   return page.locator("section,div,article").filter({ hasText: /1[- ]?click trade|one[- ]?click/i }).first();
 }
 async function findApprove(page) {
-  const scope = (await oneClickSection(page).count()) > 0 ? oneClickSection(page) : page;
+  const section = oneClickSection(page);
+  const scope = (await section.count()) > 0 ? section : page;
 
   // 1) Sehr spezifisch: weißer Button mit Text "Approve"
   let btn = scope.locator('button.btn-white:has-text("Approve")').first();
@@ -180,8 +168,8 @@ async function findApprove(page) {
   if (await btn.count() === 0) btn = scope.getByRole("button", { name: /^approve$/i }).first();
   if (await btn.count() === 0) btn = scope.locator('button:has-text("Approve")').first();
 
-  // 3) Notnagel: sichtbarer Button exakt "Approve"
-  if (await btn.count() === 0) btn = scope.locator("button").filter({ hasText: /^Approve\s*$/i }).first();
+  // 3) Notnagel
+  if (await btn.count() === 0) btn = scope.locator('button').filter({ hasText: /^Approve\s*$/i }).first();
 
   return btn;
 }
@@ -189,7 +177,10 @@ async function clickSmart(page, btn) {
   try { await btn.scrollIntoViewIfNeeded(); } catch {}
   try { await btn.click({ timeout: 800 }); return true; } catch {}
   // JS-Click Fallback
-  try { await page.evaluate((el) => el && el.click(), await btn.elementHandle()); return true; } catch {}
+  try {
+    await page.evaluate((el) => el && el.click(), await btn.elementHandle());
+    return true;
+  } catch {}
   // Maus-Fallback
   try { const box = await btn.boundingBox(); if (box) { await page.mouse.click(box.x+box.width/2, box.y+box.height/2); return true; } } catch {}
   return false;
@@ -219,7 +210,7 @@ async function approveOne(opts = { fast: true }) {
       if (opts.fast) {
         await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
         await dismissOverlays(page).catch(()=>{});
-        logHere(page, "fast:afterGoto");
+        console.log("[fast:afterGoto] url=", page.url());
         if (onLoginUrl(page)) return { ok:false, reason:"LOGIN_REQUIRED" };
         const ok = await tryApproveOnDashboard(page);
         if (ok) { approvesToday++; return { ok:true, reason:"APPROVED_FAST" }; }
@@ -231,7 +222,6 @@ async function approveOne(opts = { fast: true }) {
 
       for (let i = 0; i < 5; i++) {
         if (await tryApproveOnDashboard(page)) { approvesToday++; return { ok:true, reason: i===0 ? "APPROVED_DIRECT" : "APPROVED_AFTER_REFRESH" }; }
-
         const bell = page.getByRole("button", { name: /notifications|bell/i }).first();
         if (await bell.count()) {
           await bell.click().catch(()=>{});
@@ -244,9 +234,11 @@ async function approveOne(opts = { fast: true }) {
       if (env.DEBUG_SHOTS) {
         try {
           const ts = Date.now();
-          await page.screenshot({ path: `no-approve-${ts}.png`, fullPage: true });
+          const base = path.join(DEBUG_DIR, `no-approve-${ts}`);
+          await page.screenshot({ path: `${base}.png`, fullPage: true });
           const html = await page.content();
-          fs.writeFileSync(`no-approve-${ts}.html`, html);
+          fs.writeFileSync(`${base}.html`, html);
+          console.log(`🧩 Saved debug files: ${base}.png / .html`);
         } catch {}
       }
       return { ok:false, reason:"NO_BUTTON" };
@@ -259,10 +251,9 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- Heartbeat (schläft außerhalb des Fensters) ----------
+// ---------- Heartbeat (random 7–12 min) ----------
 const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 let hbTimer = null;
-
 async function heartbeat(){
   if (!inWindow()) return;
   try {
@@ -271,39 +262,22 @@ async function heartbeat(){
       if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) await ensureOnDashboard(page).catch(()=>{});
       await dismissOverlays(page).catch(()=>{});
     });
-    console.log("🫀 Heartbeat OK");
+    console.log("🔄 Heartbeat OK");
   } catch(e){ console.error("Heartbeat:", e.message); }
 }
-
-function scheduleNextHeartbeat(){
-  clearTimeout(hbTimer);
-  const minsToStart = minutesUntilWindowStart();
-
-  if (minsToStart > 0){
-    const delayMs = (minsToStart*60 + rnd(0,20)) * 1000; // kleiner Jitter
-    console.log(`😴 Outside window. Sleeping ~${(delayMs/60000).toFixed(1)} min until window opens.`);
-    hbTimer = setTimeout(() => {
-      heartbeat().finally(scheduleNextHeartbeat);
-    }, delayMs);
-    return;
-  }
-
+function scheduleNextHeartbeat() {
   const minMs = env.HEARTBEAT_MIN_MIN * 60_000;
   const maxMs = env.HEARTBEAT_MAX_MIN * 60_000;
-  const delay = rnd(minMs, maxMs) + rnd(0,20)*1000;
+  const jitter = rnd(0, 20) * 1000;
+  const delay = rnd(minMs, maxMs) + jitter;
   console.log(`⏰ Next heartbeat in ~${(delay/60000).toFixed(1)} min`);
-  hbTimer = setTimeout(async ()=>{
-    await heartbeat();
-    scheduleNextHeartbeat();
-  }, delay);
+  hbTimer = setTimeout(async () => { await heartbeat(); scheduleNextHeartbeat(); }, delay);
 }
-
 // Reset Tageszähler
 cron.schedule("0 0 * * *", () => { approvesToday = 0; }, { timezone: "UTC" });
 
 // ---------- HTTP ----------
 const app = express();
-
 function checkAuth(req,res,next){
   if (!env.AUTH_TOKEN) return next();
   const token = req.headers["x-auth"] || req.query.auth;
@@ -313,7 +287,6 @@ function checkAuth(req,res,next){
 
 app.get("/approve", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:false })));
 app.get("/approve-fast", checkAuth, async (_req,res)=> res.json(await approveOne({ fast:true })));
-
 app.get("/login-status", checkAuth, async (_req,res)=>{
   try{
     const r = await withCtx(async page=>{
@@ -324,14 +297,13 @@ app.get("/login-status", checkAuth, async (_req,res)=>{
     res.json({ ok:true, status:r });
   } catch(e){ res.json({ ok:false, error:e.message }); }
 });
-
 app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
   hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`
 }));
 
-// Fast Webhook: erst FAST, dann Fallback
+// ---- Fast webhook ----
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
   try { const msg = (req.body && req.body.message) ? String(req.body.message) : ""; console.log("Signal received:", msg.slice(0, 160)); } catch {}
   res.json({ ok: true, queued: true });
@@ -340,6 +312,49 @@ app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (re
   try { rFast = await approveOne({ fast: true }); console.log("approve-async fast:", rFast); } catch (e) { console.error("approve-async fast error:", e.message); }
   if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQUIRED"))) {
     try { const r2 = await approveOne({ fast: false }); console.log("approve-async fallback:", r2); } catch (e) { console.error("approve-async fallback error:", e.message); }
+  }
+});
+
+// ---------- DEBUG ENDPOINTS ----------
+function requireAuth(req, res) {
+  if (!env.AUTH_TOKEN) return false;
+  const t = req.headers["x-auth"] || req.query.auth;
+  if (t !== env.AUTH_TOKEN) {
+    res.status(401).json({ ok:false, reason:"UNAUTHORIZED" });
+    return true;
+  }
+  return false;
+}
+
+// Liste aller Debug-Dateien (png/html) mit letzter Änderung
+app.get("/debug/shots", (req, res) => {
+  if (requireAuth(req, res)) return;
+  try {
+    const files = fs.readdirSync(DEBUG_DIR)
+      .filter(f => f.endsWith(".png") || f.endsWith(".html"))
+      .map(f => ({
+        name: f,
+        mtime: fs.statSync(path.join(DEBUG_DIR, f)).mtimeMs
+      }))
+      .sort((a,b) => b.mtime - a.mtime);
+    res.json({ ok:true, dir: "/debug", files });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
+// Einzelne Debug-Datei downloaden/anzeigen
+app.get("/debug/file/:name", (req, res) => {
+  if (requireAuth(req, res)) return;
+  try {
+    const name = req.params.name || "";
+    const safe = name.replace(/[^a-zA-Z0-9._-]/g, "");
+    const full = path.join(DEBUG_DIR, safe);
+    if (!full.startsWith(DEBUG_DIR)) return res.status(400).json({ ok:false, error:"Bad path" });
+    if (!fs.existsSync(full)) return res.status(404).json({ ok:false, error:"Not found" });
+    res.sendFile(full);
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
   }
 });
 

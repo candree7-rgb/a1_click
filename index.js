@@ -1,4 +1,4 @@
-// index.js — ULTRA-FAST A1 Approver: Maximum Speed, Zero Waste
+// index.js — ULTRA-FAST A1 Approver: Maximum Speed + Reliable Login
 
 import express from "express";
 import cron from "node-cron";
@@ -58,8 +58,24 @@ const inWindow = () => {
   const cur = d.getUTCHours()*60 + d.getUTCMinutes();
   return cur >= toMin(env.WINDOW_START) && cur <= toMin(env.WINDOW_END);
 };
-const onLoginUrl = (page) => /app\.algosone\.ai\/login/i.test(page.url()) || /accounts\.google\.com/i.test(page.url());
 const ts = () => new Date().toISOString().split("T")[1].replace("Z","");
+
+// ✅ NEW: Content-based logout detection
+async function isLoggedOut(page) {
+  // Fast check: URL
+  const url = page.url();
+  if (/\/login/i.test(url) || /accounts\.google\.com/i.test(url)) {
+    return true;
+  }
+  
+  // Safe check: Content (AlgosOne shows login without URL change)
+  try {
+    const hasLoginForm = await page.locator('text="Hello again"').count() > 0;
+    return hasLoginForm;
+  } catch {
+    return false;
+  }
+}
 
 // ---------- Browser Context ----------
 let browserP = null;
@@ -216,7 +232,8 @@ async function ensureOnDashboard(page) {
   await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(() => {});
   await dismissOverlays(page);
   
-  if (!onLoginUrl(page)) return true;
+  // ✅ USE NEW CHECK
+  if (!(await isLoggedOut(page))) return true;
 
   if (!env.EMAIL || !env.PASSWORD) return false;
   
@@ -227,7 +244,7 @@ async function ensureOnDashboard(page) {
   }
   
   await dismissOverlays(page);
-  return !onLoginUrl(page);
+  return !(await isLoggedOut(page));
 }
 
 // ---------- ULTRA-FAST APPROVE ----------
@@ -442,7 +459,11 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         await dismissOverlays(page);
         logLine(`[${ts()}] ${page.url()}`);
         
-        if (onLoginUrl(page)) return { ok: false, reason: "LOGIN_REQ" };
+        // ✅ USE NEW CHECK (fast URL check only, no content)
+        if (/\/login/i.test(page.url())) {
+          logLine("⚠️ On login page - skip");
+          return { ok: false, reason: "LOGGED_OUT" };
+        }
 
         // GUARANTEED REFRESH (button appears after)
         await page.reload({ waitUntil: "domcontentloaded", timeout: 2500 });
@@ -501,9 +522,21 @@ async function heartbeat(){
     await withCtx(async (page) => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(() => {});
       
-      // Only dismiss overlays if login required
-      if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) {
-        await ensureOnDashboard(page).catch(() => {});
+      // ✅ BETTER CHECK: URL + Content
+      const url = page.url();
+      const isLoginUrl = /\/login/i.test(url) || /accounts\.google\.com/i.test(url);
+      const hasLoginForm = await page.locator('text="Hello again"').count() > 0;
+      
+      if (isLoginUrl || hasLoginForm) {
+        logLine(`🔄 HB: Logged out (url=${isLoginUrl}, form=${hasLoginForm})`);
+        if (env.EMAIL && env.PASSWORD) {
+          await ensureOnDashboard(page);
+          logLine("✅ HB: Re-logged in");
+        } else {
+          logLine("❌ HB: No credentials");
+        }
+      } else {
+        logLine("✅ HB: Still logged in");
       }
     });
     logLine("🔄 HB OK");
@@ -543,7 +576,8 @@ app.get("/login-status", checkAuth, async (_req, res) => {
   try {
     const r = await withCtx(async page => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS });
-      if (onLoginUrl(page)) return (await ensureOnDashboard(page)) ? "OK" : "FAIL";
+      const loggedOut = await isLoggedOut(page);
+      if (loggedOut) return (await ensureOnDashboard(page)) ? "OK" : "FAIL";
       return "OK";
     });
     res.json({ ok: true, status: r });
@@ -581,7 +615,7 @@ app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (re
     
     if (rFast?.reason === "TOO_OLD") return;
     
-    if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGIN_REQ"))) {
+    if (!rFast || (rFast.ok === false && (rFast.reason === "NO_BUTTON" || rFast.reason === "LOGGED_OUT"))) {
       const ageSec = Math.round((Date.now() - signalTime) / 1000);
       if (ageSec > env.MAX_AGE_SEC) {
         logLine(`⏰ Skip fallback (${ageSec}s)`);
@@ -669,10 +703,11 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 Ultra-Fast Approver v3.0 :${env.PORT}`);
+  logLine(`🚀 Ultra-Fast Approver v3.1 :${env.PORT}`);
   logLine(`⏰ ${env.WINDOW_START}-${env.WINDOW_END}`);
   logLine(`💓 ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
   logLine(`⏱️ Max age: ${env.MAX_AGE_SEC}s`);
   logLine(`⚡ Target: <4s signal→execution`);
+  logLine(`✅ Content-based login detection enabled`);
   scheduleNextHeartbeat();
 });

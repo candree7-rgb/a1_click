@@ -1,4 +1,4 @@
-// index.js — ULTRA-FAST A1 Approver v3.5.1 - GUARANTEED LOGIN FIX
+// index.js — ULTRA-FAST A1 Approver v3.6 - FINAL FIX
 
 import express from "express";
 import cron from "node-cron";
@@ -64,13 +64,11 @@ const ts = () => new Date().toISOString().split("T")[1].replace("Z","");
 async function isLoggedOut(page) {
   const url = page.url();
   
-  // Fast check: URL-based
   if (/\/login/i.test(url) || /accounts\.google\.com/i.test(url)) {
     logLine(`🔍 Login detected (URL: ${url})`);
     return true;
   }
   
-  // Robust check: Full page content
   try {
     const bodyText = await page.locator('body').textContent({ timeout: 3000 });
     
@@ -91,7 +89,6 @@ async function isLoggedOut(page) {
       }
     }
     
-    // Inverse check: Look for dashboard elements
     const dashboardSelectors = [
       '#signals',
       '[class*="signal"]',
@@ -155,7 +152,6 @@ async function dismissOverlays(page) {
   const started = Date.now();
   
   await Promise.allSettled([
-    // Cookie Policy Dialog
     (async () => {
       const hasCookiePolicy = await page.locator('text="COOKIE POLICY"').count() > 0;
       if (hasCookiePolicy) {
@@ -170,7 +166,6 @@ async function dismissOverlays(page) {
       }
     })(),
     
-    // Cookie Banner
     (async () => {
       const banner = page.locator('text=/cookies/i')
         .locator('..')
@@ -182,7 +177,6 @@ async function dismissOverlays(page) {
       }
     })(),
     
-    // Nuclear: High z-index elements
     page.evaluate(() => {
       let count = 0;
       document.querySelectorAll('*').forEach(el => {
@@ -233,19 +227,15 @@ async function handlePopupApprove(page, maxWait = 400) {
   }
 }
 
-// ---------- ✅ GUARANTEED LOGIN (ID + AUTOCOMPLETE + ORIGINAL FALLBACKS) ----------
+// ---------- ✅ 2-STEP LOGIN (EMAIL → NEXT → PASSWORD → SIGN IN) ----------
 async function loginWithPassword(page) {
   logLine("🔐 Starting password login...");
   
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await page.waitForTimeout(1000);  // Wait for React to render
+  await page.waitForTimeout(1000);
   await dismissOverlays(page).catch(()=>{});
   
-  // ✅ MULTI-STRATEGY (in priority order):
-  // 1. ID selectors (from your HTML: id="email", id="password")
-  // 2. Autocomplete attributes (autocomplete="username", autocomplete="current-password")
-  // 3. Original strategies (label, placeholder, type) as fallback
-  
+  // ✅ STEP 1: EMAIL
   const email = page.locator('#email')
     .or(page.locator('input[autocomplete="username"]'))
     .or(page.getByLabel(/email/i))
@@ -253,7 +243,26 @@ async function loginWithPassword(page) {
     .or(page.locator('input[type="email"]'))
     .or(page.locator('input[type="text"]').first())
     .first();
-    
+  
+  await email.waitFor({ state: "visible", timeout: 20000 }); 
+  await email.fill(env.EMAIL);
+  logLine(`📧 Filled email: ${env.EMAIL}`);
+  
+  // ✅ CHECK: Is there a NEXT/CONTINUE button? (2-step login)
+  const nextBtn = page.locator('button')
+    .filter({ hasText: /^(next|continue|weiter)$/i })
+    .first();
+  
+  const hasNextBtn = await nextBtn.count() > 0;
+  
+  if (hasNextBtn) {
+    logLine("🔄 2-step login detected, clicking NEXT...");
+    await nextBtn.click({ timeout: 5000 });
+    await page.waitForTimeout(1500);
+    logLine("⏳ Waiting for password field...");
+  }
+  
+  // ✅ STEP 2: PASSWORD (now visible after NEXT)
   const pass = page.locator('#password')
     .or(page.locator('input[autocomplete="current-password"]'))
     .or(page.getByLabel(/password|passwort/i))
@@ -261,15 +270,11 @@ async function loginWithPassword(page) {
     .or(page.locator('input[type="password"]'))
     .first();
   
-  await email.waitFor({ state: "visible", timeout: 20000 }); 
-  await email.fill(env.EMAIL);
-  logLine(`📧 Filled email: ${env.EMAIL}`);
-  
   await pass.waitFor({ state: "visible", timeout: 20000 }); 
   await pass.fill(env.PASSWORD);
   logLine("🔑 Filled password");
   
-  // ✅ SUBMIT: Multiple strategies (button might be disabled initially)
+  // ✅ STEP 3: SUBMIT
   const submit = page.locator('button.btn-primary')
     .filter({ hasText: /sign in|login/i })
     .or(page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i }))
@@ -278,10 +283,9 @@ async function loginWithPassword(page) {
   
   await submit.waitFor({ state: "visible", timeout: 5000 });
   
-  // Try click (fallback to Enter if button disabled)
   const clicked = await submit.click({ timeout: 2000 }).then(() => true).catch(() => false);
   if (!clicked) {
-    logLine("⚠️ Button click failed (probably disabled), using Enter");
+    logLine("⚠️ Button click failed, using Enter");
     await pass.press("Enter");
   } else {
     logLine("✅ Clicked Sign In button");
@@ -348,7 +352,7 @@ async function ensureOnDashboard(page) {
   return true;
 }
 
-// ---------- ULTRA-FAST APPROVE (UNCHANGED!) ----------
+// ---------- ULTRA-FAST APPROVE ----------
 function allScopes(page) { return [page, ...page.frames()]; }
 
 async function findApproveTargets(scope) {
@@ -504,7 +508,9 @@ async function tryApproveOnDashboard(page) {
       if (env.DEBUG_SHOTS) {
         const base = path.join(DEBUG_DIR, `click-${Date.now()}-${verdict.ok ? 'OK' : 'FAIL'}`);
         await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
-        fs.writeFileSync(`${base}.html`, await page.content()).catch(() => {});
+        try {
+          fs.writeFileSync(`${base}.html`, await page.content());
+        } catch {}
       }
 
       if (verdict.ok) {
@@ -520,17 +526,24 @@ async function tryApproveOnDashboard(page) {
   return false;
 }
 
+// ---------- ✅ APPROVE WITH SIGNAL AGE RE-CHECK ----------
 async function approveOne(opts = { fast: true, signalTime: null }) {
   const execStart = Date.now();
   
-  if (opts.signalTime) {
+  // ✅ HELPER: Check signal age (DRY principle)
+  const checkAge = () => {
+    if (!opts.signalTime) return true;  // No signal time = manual call = allow
     const ageSec = Math.round((Date.now() - opts.signalTime) / 1000);
     if (ageSec > env.MAX_AGE_SEC) {
       logLine(`⏰ Too old: ${ageSec}s`);
-      return { ok: false, reason: "TOO_OLD", ageSec };
+      return false;
     }
     logLine(`⏱️ Age: ${ageSec}s`);
-  }
+    return true;
+  };
+  
+  // ✅ CHECK 1: At start
+  if (!checkAge()) return { ok: false, reason: "TOO_OLD" };
   
   if (!inWindow()) return { ok: false, reason: "OUTSIDE_WINDOW" };
   if (approvesToday >= env.MAX_PER_DAY) return { ok: false, reason: "LIMIT" };
@@ -563,6 +576,9 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         if (env.DEBUG_SHOTS) {
           const base = path.join(DEBUG_DIR, `no-btn-${Date.now()}`);
           await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
+          try {
+            fs.writeFileSync(`${base}.html`, await page.content());
+          } catch {}
         }
         return { ok: false, reason: "NO_BUTTON" };
       }
@@ -573,6 +589,9 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         logLine("❌ Login failed in slow path");
         return { ok: false, reason: "LOGIN_FAILED" };
       }
+
+      // ✅ CHECK 2: After login (re-check age!)
+      if (!checkAge()) return { ok: false, reason: "TOO_OLD_AFTER_LOGIN" };
 
       for (let i = 0; i < 5; i++) {
         if (await tryApproveOnDashboard(page)) { 
@@ -599,7 +618,7 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
   }
 }
 
-// ---------- ✅ HEARTBEAT WITH RELOAD + BODY-TEXT CHECK ----------
+// ---------- HEARTBEAT ----------
 const rnd = (a,b) => Math.floor(Math.random() * (b - a + 1)) + a;
 
 async function heartbeat(){
@@ -714,7 +733,7 @@ app.get("/health", (_req, res) => res.json({
   hb: `${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`,
   maxAge: env.MAX_AGE_SEC,
   today: approvesToday,
-  version: "3.5.1"
+  version: "3.6"
 }));
 
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
@@ -763,7 +782,9 @@ app.post("/debug/snap", checkAuth, async (_req, res) => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(() => {});
       await dismissOverlays(page);
       await page.screenshot({ path: `${base}.png`, fullPage: true });
-      fs.writeFileSync(`${base}.html`, await page.content());
+      try {
+        fs.writeFileSync(`${base}.html`, await page.content());
+      } catch {}
       return path.basename(base);
     });
     res.json({ ok: true, saved: [`${out}.png`, `${out}.html`] });
@@ -829,14 +850,14 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 Ultra-Fast Approver v3.5.1 :${env.PORT}`);
+  logLine(`🚀 Ultra-Fast Approver v3.6 :${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
   logLine(`⏱️ Max signal age: ${env.MAX_AGE_SEC}s`);
   logLine(`🔐 Login method: ${env.LOGIN_METHOD}`);
-  logLine(`✅ 6-strategy login (ID + autocomplete + original fallbacks)`);
+  logLine(`✅ 2-step login (email → next → password)`);
+  logLine(`✅ Signal age re-check after login`);
   logLine(`✅ Robust body-text logout detection`);
-  logLine(`✅ Heartbeat with reload + re-login`);
   logLine(`⚡ Target: <4s signal→execution`);
   scheduleNextHeartbeat();
 });

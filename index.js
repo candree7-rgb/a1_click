@@ -1,4 +1,4 @@
-// index.js — ULTRA-FAST A1 Approver v3.4 - ROBUST LOGIN DETECTION
+// index.js — ULTRA-FAST A1 Approver v3.5.1 - GUARANTEED LOGIN FIX
 
 import express from "express";
 import cron from "node-cron";
@@ -60,7 +60,7 @@ const inWindow = () => {
 };
 const ts = () => new Date().toISOString().split("T")[1].replace("Z","");
 
-// ✅ FIXED: Robust login detection with body-text check
+// ✅ ROBUST: Body-text based login detection
 async function isLoggedOut(page) {
   const url = page.url();
   
@@ -72,10 +72,8 @@ async function isLoggedOut(page) {
   
   // Robust check: Full page content
   try {
-    // Get ALL visible text from page
     const bodyText = await page.locator('body').textContent({ timeout: 3000 });
     
-    // Login page indicators (case-insensitive)
     const loginPatterns = [
       /hello again/i,
       /sign in/i,
@@ -156,7 +154,6 @@ async function withCtx(fn) {
 async function dismissOverlays(page) {
   const started = Date.now();
   
-  // PARALLEL: All layers at once
   await Promise.allSettled([
     // Cookie Policy Dialog
     (async () => {
@@ -212,18 +209,15 @@ async function handlePopupApprove(page, maxWait = 400) {
   const started = Date.now();
   
   try {
-    // DIRECT: Find blue button (skip text search)
     const blueBtn = page.locator('[role="dialog"] button, dialog button')
       .filter({ hasText: /^approve$/i })
       .first();
     
-    // Wait for button (max 400ms)
     await blueBtn.waitFor({ state: 'visible', timeout: maxWait });
     
     const elapsed = Date.now() - started;
     logLine(`🔵 Popup appeared (${elapsed}ms)`);
     
-    // INSTANT CLICK: No extra waits
     const box = await blueBtn.boundingBox();
     if (box) {
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
@@ -235,47 +229,80 @@ async function handlePopupApprove(page, maxWait = 400) {
     logLine("✅ Blue clicked!");
     return true;
   } catch {
-    // No popup = direct approve (normal flow)
     return false;
   }
 }
 
-// ---------- Login ----------
+// ---------- ✅ GUARANTEED LOGIN (ID + AUTOCOMPLETE + ORIGINAL FALLBACKS) ----------
 async function loginWithPassword(page) {
   logLine("🔐 Starting password login...");
   
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await dismissOverlays(page);
+  await page.waitForTimeout(1000);  // Wait for React to render
+  await dismissOverlays(page).catch(()=>{});
   
-  const email = page.locator('input[type="email"]').first();
-  const pass = page.locator('input[type="password"]').first();
+  // ✅ MULTI-STRATEGY (in priority order):
+  // 1. ID selectors (from your HTML: id="email", id="password")
+  // 2. Autocomplete attributes (autocomplete="username", autocomplete="current-password")
+  // 3. Original strategies (label, placeholder, type) as fallback
+  
+  const email = page.locator('#email')
+    .or(page.locator('input[autocomplete="username"]'))
+    .or(page.getByLabel(/email/i))
+    .or(page.getByPlaceholder(/email|e-mail/i))
+    .or(page.locator('input[type="email"]'))
+    .or(page.locator('input[type="text"]').first())
+    .first();
+    
+  const pass = page.locator('#password')
+    .or(page.locator('input[autocomplete="current-password"]'))
+    .or(page.getByLabel(/password|passwort/i))
+    .or(page.getByPlaceholder(/password|passwort/i))
+    .or(page.locator('input[type="password"]'))
+    .first();
   
   await email.waitFor({ state: "visible", timeout: 20000 }); 
   await email.fill(env.EMAIL);
   logLine(`📧 Filled email: ${env.EMAIL}`);
   
+  await pass.waitFor({ state: "visible", timeout: 20000 }); 
   await pass.fill(env.PASSWORD);
   logLine("🔑 Filled password");
   
-  await pass.press("Enter");
+  // ✅ SUBMIT: Multiple strategies (button might be disabled initially)
+  const submit = page.locator('button.btn-primary')
+    .filter({ hasText: /sign in|login/i })
+    .or(page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i }))
+    .or(page.locator('button[type="submit"]'))
+    .first();
+  
+  await submit.waitFor({ state: "visible", timeout: 5000 });
+  
+  // Try click (fallback to Enter if button disabled)
+  const clicked = await submit.click({ timeout: 2000 }).then(() => true).catch(() => false);
+  if (!clicked) {
+    logLine("⚠️ Button click failed (probably disabled), using Enter");
+    await pass.press("Enter");
+  } else {
+    logLine("✅ Clicked Sign In button");
+  }
+  
   logLine("⏎ Submitted login form");
   
   await page.waitForLoadState("networkidle", { timeout: 90000 });
-  await dismissOverlays(page);
-  
-  // Wait for redirect to dashboard
-  await page.waitForURL(/dashboard/i, { timeout: 90000 }).catch(() => {
+  await dismissOverlays(page).catch(()=>{});
+  await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 }).catch(()=>{
     logLine("⚠️ No redirect to /dashboard after login");
   });
   
-  logLine("✅ Login form submitted, waiting for dashboard...");
+  logLine("✅ Login complete");
 }
 
 async function loginWithGoogle(page) {
   logLine("🔐 Starting Google login...");
   
   await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await dismissOverlays(page);
+  await dismissOverlays(page).catch(()=>{});
   await page.getByRole("button", { name: /google/i }).first().click({ timeout: 20000 });
   await page.waitForURL(/accounts\.google\.com/i, { timeout: 90000 });
   await page.getByRole("textbox", { name: /email/i }).fill(env.EMAIL);
@@ -283,16 +310,15 @@ async function loginWithGoogle(page) {
   await page.getByRole("textbox", { name: /password/i }).fill(env.PASSWORD);
   await page.getByRole("button", { name: /next/i }).click();
   await page.waitForURL(/dashboard/i, { timeout: 90000 });
-  await dismissOverlays(page);
+  await dismissOverlays(page).catch(()=>{});
   
   logLine("✅ Google login complete");
 }
 
 async function ensureOnDashboard(page) {
   await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(() => {});
-  await dismissOverlays(page);
+  await dismissOverlays(page).catch(() => {});
   
-  // Check if already logged in
   if (!(await isLoggedOut(page))) {
     logLine("✅ Already on dashboard");
     return true;
@@ -310,9 +336,8 @@ async function ensureOnDashboard(page) {
     return false; 
   }
   
-  await dismissOverlays(page);
+  await dismissOverlays(page).catch(() => {});
   
-  // Verify we're logged in
   const stillLoggedOut = await isLoggedOut(page);
   if (stillLoggedOut) {
     logLine("❌ Still logged out after login attempt");
@@ -323,13 +348,12 @@ async function ensureOnDashboard(page) {
   return true;
 }
 
-// ---------- ULTRA-FAST APPROVE ----------
+// ---------- ULTRA-FAST APPROVE (UNCHANGED!) ----------
 function allScopes(page) { return [page, ...page.frames()]; }
 
 async function findApproveTargets(scope) {
   const targets = [];
   
-  // PRIORITY ORDER: Most specific first
   const selectors = [
     { sel: scope.locator('#signals button.btn-white').filter({ hasText: /^approve$/i }), why: '#signals' },
     { sel: scope.locator('.rounded-box-5 button.btn-white').filter({ hasText: /^approve$/i }), why: 'rounded-box' },
@@ -350,7 +374,6 @@ async function findApproveTargets(scope) {
 }
 
 async function clickRobust(page, locator) {
-  // FAST: Skip scroll (already visible from screenshots)
   let box = await locator.boundingBox().catch(() => null);
   
   if (!box) {
@@ -363,13 +386,11 @@ async function clickRobust(page, locator) {
     }
   }
   
-  // PRIO 1: MOUSE (fastest, ignores overlays)
   if (box?.width > 0 && box?.height > 0) {
     try {
       const x = box.x + box.width / 2;
       const y = box.y + box.height / 2;
       
-      // Hide overlays BEFORE click
       await page.evaluate(() => {
         document.querySelectorAll('*').forEach(el => {
           const z = parseInt(window.getComputedStyle(el).zIndex);
@@ -383,14 +404,12 @@ async function clickRobust(page, locator) {
     } catch {}
   }
   
-  // PRIO 2: Force click
   try {
     await locator.click({ timeout: 1000, force: true });
     logLine("✓ Force click");
     return true;
   } catch {}
   
-  // PRIO 3: JS dispatch
   try {
     const el = await locator.elementHandle();
     if (el) {
@@ -412,16 +431,12 @@ async function verifyApproved(page, targetBefore) {
   let via = null;
 
   while (Date.now() - started < env.POST_CLICK_VERIFY_MS) {
-    // FAST CHECKS: Parallel
     const [toastFound, buttonGone, networkOk] = await Promise.all([
-      // Toast
       page.locator('text=/approved|executed|success|confirmed/i').first().count()
         .then(c => c > 0),
       
-      // Button state
       targetBefore.count().then(c => c === 0),
       
-      // Network
       page.waitForResponse(r => {
         const url = r.url();
         const match = netRe.test(url) && r.request().method() !== 'OPTIONS';
@@ -455,7 +470,6 @@ async function verifyApproved(page, targetBefore) {
 async function tryApproveOnDashboard(page) {
   const overall = Date.now();
   
-  // FAST: Minimal waits
   await page.waitForTimeout(150);
   await dismissOverlays(page);
   await page.waitForTimeout(100);
@@ -470,24 +484,19 @@ async function tryApproveOnDashboard(page) {
       const { locator, why } = target;
       logLine(`🎯 ${why}`);
       
-      // SKIP visibility check (trust findApproveTargets)
       const clicked = await clickRobust(scope, locator);
       if (!clicked) {
         logLine("   ❌ Click failed");
         continue;
       }
 
-      // ULTRA-FAST: Parallel popup check + verify
       const popupPromise = handlePopupApprove(page, 400);
-      
-      // Wait for popup (max 400ms)
       const hasPopup = await popupPromise;
       
-      // SMART WAIT: Only if needed
       if (hasPopup) {
-        await page.waitForTimeout(300); // Wait for trade execution
+        await page.waitForTimeout(300);
       } else {
-        await page.waitForTimeout(500); // Direct approve
+        await page.waitForTimeout(500);
       }
 
       const verdict = await verifyApproved(scope, locator);
@@ -535,13 +544,11 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         await dismissOverlays(page);
         logLine(`[${ts()}] ${page.url()}`);
         
-        // ✅ FAST: Only URL check (content check = too slow)
         if (/\/login/i.test(page.url())) {
           logLine("⚠️ On login page - SKIP (heartbeat should have prevented this!)");
           return { ok: false, reason: "LOGGED_OUT" };
         }
 
-        // GUARANTEED REFRESH (button appears after)
         await page.reload({ waitUntil: "domcontentloaded", timeout: 2500 });
         await dismissOverlays(page);
         await page.waitForTimeout(150);
@@ -560,7 +567,6 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         return { ok: false, reason: "NO_BUTTON" };
       }
 
-      // SLOW (with login)
       logLine("🐌 Slow path: ensuring login...");
       const logged = await ensureOnDashboard(page);
       if (!logged) {
@@ -593,7 +599,7 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
   }
 }
 
-// ---------- Heartbeat ----------
+// ---------- ✅ HEARTBEAT WITH RELOAD + BODY-TEXT CHECK ----------
 const rnd = (a,b) => Math.floor(Math.random() * (b - a + 1)) + a;
 
 async function heartbeat(){
@@ -601,13 +607,21 @@ async function heartbeat(){
   try {
     await withCtx(async (page) => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(() => {});
+      await dismissOverlays(page);
       
-      // ✅ ROBUST: Check with body-text detector
+      logLine("🔄 HB: Reloading to check auth state...");
+      await page.reload({ waitUntil: "networkidle", timeout: 5000 }).catch(() => 
+        page.reload({ waitUntil: "domcontentloaded", timeout: 3000 })
+      );
+      
+      await page.waitForTimeout(800);
+      await dismissOverlays(page);
+      
       const loggedOut = await isLoggedOut(page);
       const url = page.url();
       
       if (loggedOut) {
-        logLine(`🔄 HB: LOGGED OUT detected!`);
+        logLine(`🔄 HB: LOGGED OUT detected! (url: ${url})`);
         if (env.EMAIL && env.PASSWORD) {
           const success = await ensureOnDashboard(page);
           if (success) {
@@ -619,7 +633,7 @@ async function heartbeat(){
           logLine("❌ HB: No credentials for re-login");
         }
       } else {
-        logLine(`✅ HB: Still logged in`);
+        logLine(`✅ HB: Still logged in (url: ${url})`);
       }
     });
     logLine("🔄 HB OK");
@@ -628,11 +642,8 @@ async function heartbeat(){
   }
 }
 
-// ✅ FIXED: Smart scheduler (respects window)
 function scheduleNextHeartbeat() {
-  // Check if we're in active window
   if (!inWindow()) {
-    // Calculate delay until window starts
     const now = new Date();
     const curMin = now.getUTCHours() * 60 + now.getUTCMinutes();
     const startMin = toMin(env.WINDOW_START);
@@ -640,17 +651,14 @@ function scheduleNextHeartbeat() {
     
     let delayMin;
     if (curMin < startMin) {
-      // Before window today
       delayMin = startMin - curMin;
     } else if (curMin > endMin) {
-      // After window today, wait until tomorrow
       delayMin = (24 * 60) - curMin + startMin;
     } else {
-      // Shouldn't happen, but fallback
       delayMin = 60;
     }
     
-    const delayMs = delayMin * 60000 + rnd(0, 30000); // +0-30s jitter
+    const delayMs = delayMin * 60000 + rnd(0, 30000);
     const hours = Math.floor(delayMin / 60);
     const mins = delayMin % 60;
     logLine(`😴 Outside window (${env.WINDOW_START}-${env.WINDOW_END}), next check in ${hours}h${mins}min`);
@@ -659,7 +667,6 @@ function scheduleNextHeartbeat() {
     return;
   }
   
-  // IN WINDOW: Normal heartbeat scheduling
   const delay = rnd(env.HEARTBEAT_MIN_MIN * 60000, env.HEARTBEAT_MAX_MIN * 60000) + rnd(0, 20000);
   logLine(`⏰ Next HB: ~${(delay / 60000).toFixed(1)}min`);
   
@@ -707,7 +714,7 @@ app.get("/health", (_req, res) => res.json({
   hb: `${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`,
   maxAge: env.MAX_AGE_SEC,
   today: approvesToday,
-  version: "3.4"
+  version: "3.5.1"
 }));
 
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
@@ -731,7 +738,6 @@ app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (re
     
     if (rFast?.reason === "TOO_OLD") return;
     
-    // Fallback to slow path if fast failed
     if (!rFast || (rFast.ok === false && ["NO_BUTTON", "LOGGED_OUT"].includes(rFast.reason))) {
       const ageSec = Math.round((Date.now() - signalTime) / 1000);
       if (ageSec > env.MAX_AGE_SEC) {
@@ -823,12 +829,14 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 Ultra-Fast Approver v3.4 :${env.PORT}`);
+  logLine(`🚀 Ultra-Fast Approver v3.5.1 :${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
   logLine(`⏱️ Max signal age: ${env.MAX_AGE_SEC}s`);
   logLine(`🔐 Login method: ${env.LOGIN_METHOD}`);
-  logLine(`✅ Robust body-text login detection`);
+  logLine(`✅ 6-strategy login (ID + autocomplete + original fallbacks)`);
+  logLine(`✅ Robust body-text logout detection`);
+  logLine(`✅ Heartbeat with reload + re-login`);
   logLine(`⚡ Target: <4s signal→execution`);
   scheduleNextHeartbeat();
 });

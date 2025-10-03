@@ -1,4 +1,4 @@
-// index.js — ULTRA-FAST A1 Approver: Maximum Speed + Reliable Login
+// index.js — ULTRA-FAST A1 Approver v3.2 - FIXED LOGIN DETECTION
 
 import express from "express";
 import cron from "node-cron";
@@ -60,20 +60,29 @@ const inWindow = () => {
 };
 const ts = () => new Date().toISOString().split("T")[1].replace("Z","");
 
-// ✅ NEW: Content-based logout detection
+// ✅ FIXED: Robust login detection
 async function isLoggedOut(page) {
-  // Fast check: URL
   const url = page.url();
+  
+  // Fast check: URL-based
   if (/\/login/i.test(url) || /accounts\.google\.com/i.test(url)) {
     return true;
   }
   
-  // Safe check: Content (AlgosOne shows login without URL change)
+  // Safe checks: Content-based (multiple indicators)
   try {
-    const hasLoginForm = await page.locator('text="Hello again"').count() > 0;
-    return hasLoginForm;
+    const [hasHelloAgain, hasSignIn, hasEmailInput, hasPasswordInput] = await Promise.all([
+      page.getByText('Hello again', { exact: false }).count(),
+      page.getByText('Sign In', { exact: false }).count(),
+      page.locator('input[type="email"]').count(),
+      page.locator('input[type="password"]').count(),
+    ]);
+    
+    // ANY login indicator = logged out
+    return hasHelloAgain > 0 || hasSignIn > 0 || hasEmailInput > 0 || hasPasswordInput > 0;
   } catch {
-    return false;
+    // On error, assume logged out (safe fallback)
+    return true;
   }
 }
 
@@ -232,7 +241,7 @@ async function ensureOnDashboard(page) {
   await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(() => {});
   await dismissOverlays(page);
   
-  // ✅ USE NEW CHECK
+  // Check if logged out
   if (!(await isLoggedOut(page))) return true;
 
   if (!env.EMAIL || !env.PASSWORD) return false;
@@ -459,9 +468,9 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         await dismissOverlays(page);
         logLine(`[${ts()}] ${page.url()}`);
         
-        // ✅ USE NEW CHECK (fast URL check only, no content)
+        // ✅ FAST: Only URL check (skip content = too slow)
         if (/\/login/i.test(page.url())) {
-          logLine("⚠️ On login page - skip");
+          logLine("⚠️ On login page - skip (heartbeat will fix)");
           return { ok: false, reason: "LOGGED_OUT" };
         }
 
@@ -522,26 +531,29 @@ async function heartbeat(){
     await withCtx(async (page) => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(() => {});
       
-      // ✅ BETTER CHECK: URL + Content
+      // ✅ BETTER: Check with robust detector
+      const loggedOut = await isLoggedOut(page);
       const url = page.url();
-      const isLoginUrl = /\/login/i.test(url) || /accounts\.google\.com/i.test(url);
-      const hasLoginForm = await page.locator('text="Hello again"').count() > 0;
       
-      if (isLoginUrl || hasLoginForm) {
-        logLine(`🔄 HB: Logged out (url=${isLoginUrl}, form=${hasLoginForm})`);
+      if (loggedOut) {
+        logLine(`🔄 HB: LOGGED OUT (url: ${url})`);
         if (env.EMAIL && env.PASSWORD) {
-          await ensureOnDashboard(page);
-          logLine("✅ HB: Re-logged in");
+          const success = await ensureOnDashboard(page);
+          if (success) {
+            logLine("✅ HB: Re-logged in successfully");
+          } else {
+            logLine("❌ HB: Re-login FAILED!");
+          }
         } else {
-          logLine("❌ HB: No credentials");
+          logLine("❌ HB: No credentials for re-login");
         }
       } else {
-        logLine("✅ HB: Still logged in");
+        logLine(`✅ HB: Still logged in (url: ${url})`);
       }
     });
     logLine("🔄 HB OK");
   } catch(e){ 
-    logLine("HB ERR:", e.message); 
+    logLine("❌ HB ERR:", e.message); 
   }
 }
 
@@ -703,11 +715,11 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 Ultra-Fast Approver v3.1 :${env.PORT}`);
+  logLine(`🚀 Ultra-Fast Approver v3.2 :${env.PORT}`);
   logLine(`⏰ ${env.WINDOW_START}-${env.WINDOW_END}`);
   logLine(`💓 ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
   logLine(`⏱️ Max age: ${env.MAX_AGE_SEC}s`);
   logLine(`⚡ Target: <4s signal→execution`);
-  logLine(`✅ Content-based login detection enabled`);
+  logLine(`✅ FIXED: Robust login detection`);
   scheduleNextHeartbeat();
 });

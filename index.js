@@ -1,4 +1,4 @@
-// index.js — ULTRA-FAST A1 Approver v3.2 - FIXED LOGIN DETECTION
+// index.js — ULTRA-FAST A1 Approver v3.3 - PERFECT WINDOW HANDLING
 
 import express from "express";
 import cron from "node-cron";
@@ -557,9 +557,41 @@ async function heartbeat(){
   }
 }
 
+// ✅ FIXED: Smart scheduler (respects window)
 function scheduleNextHeartbeat() {
+  // Check if we're in active window
+  if (!inWindow()) {
+    // Calculate delay until window starts
+    const now = new Date();
+    const curMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const startMin = toMin(env.WINDOW_START);
+    const endMin = toMin(env.WINDOW_END);
+    
+    let delayMin;
+    if (curMin < startMin) {
+      // Before window today
+      delayMin = startMin - curMin;
+    } else if (curMin > endMin) {
+      // After window today, wait until tomorrow
+      delayMin = (24 * 60) - curMin + startMin;
+    } else {
+      // Shouldn't happen, but fallback
+      delayMin = 60;
+    }
+    
+    const delayMs = delayMin * 60000 + rnd(0, 30000); // +0-30s jitter
+    const hours = Math.floor(delayMin / 60);
+    const mins = delayMin % 60;
+    logLine(`😴 Outside window (${env.WINDOW_START}-${env.WINDOW_END}), next check in ${hours}h${mins}min`);
+    
+    setTimeout(() => scheduleNextHeartbeat(), delayMs);
+    return;
+  }
+  
+  // IN WINDOW: Normal heartbeat scheduling
   const delay = rnd(env.HEARTBEAT_MIN_MIN * 60000, env.HEARTBEAT_MAX_MIN * 60000) + rnd(0, 20000);
   logLine(`⏰ Next HB: ~${(delay / 60000).toFixed(1)}min`);
+  
   setTimeout(async () => { 
     await heartbeat(); 
     scheduleNextHeartbeat(); 
@@ -715,11 +747,11 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 Ultra-Fast Approver v3.2 :${env.PORT}`);
+  logLine(`🚀 Ultra-Fast Approver v3.3 :${env.PORT}`);
   logLine(`⏰ ${env.WINDOW_START}-${env.WINDOW_END}`);
   logLine(`💓 ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
   logLine(`⏱️ Max age: ${env.MAX_AGE_SEC}s`);
   logLine(`⚡ Target: <4s signal→execution`);
-  logLine(`✅ FIXED: Robust login detection`);
+  logLine(`✅ Smart window-aware heartbeat`);
   scheduleNextHeartbeat();
 });

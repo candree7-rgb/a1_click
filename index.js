@@ -1,4 +1,4 @@
-// index.js — ULTRA-FAST A1 Approver v3.7 - LOGIN FIX ONLY
+// index.js — ULTRA-FAST A1 Approver v3.8 - TAB LOGIN
 
 import express from "express";
 import cron from "node-cron";
@@ -226,22 +226,20 @@ async function handlePopupApprove(page, maxWait = 400) {
   }
 }
 
-// ---------- ✅ FIXED LOGIN (WAIT FOR REACT STABILITY) ----------
+// ---------- ✅ TAB-BASED LOGIN (NO VISIBILITY CHECKS!) ----------
 async function loginWithPassword(page) {
   logLine("🔐 Starting password login...");
   
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  
-  // ✅ WAIT FOR REACT TO RENDER
   await page.waitForTimeout(2000);
   await dismissOverlays(page).catch(()=>{});
   
-  // ✅ WAIT FOR NETWORK IDLE (React initial fetch)
+  // ✅ WAIT FOR NETWORK IDLE (React initial render)
   await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {
     logLine("⚠️ Network not idle after page load");
   });
   
-  // EMAIL
+  // ✅ EMAIL FIELD
   const email = page.locator('#email')
     .or(page.locator('input[autocomplete="username"]'))
     .or(page.getByLabel(/email/i))
@@ -254,63 +252,33 @@ async function loginWithPassword(page) {
   await email.fill(env.EMAIL);
   logLine(`📧 Filled email: ${env.EMAIL}`);
   
-  // ✅ CRITICAL: WAIT FOR REACT RE-RENDER AFTER EMAIL INPUT!
-  await page.waitForTimeout(1500);
+  // ✅ WAIT A BIT (React might validate email)
+  await page.waitForTimeout(800);
   
-  // ✅ WAIT FOR NETWORK IDLE (Email validation?)
-  await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {
-    logLine("⚠️ Network still active after email");
-  });
+  // ✅ TAB 2x TO PASSWORD FIELD
+  // Tab 1: Away from email field (e.g., to "Forgot password?" link)
+  // Tab 2: Into password field
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(300);
+  logLine("⌨️ Tab×2 → Password field");
   
-  // PASSWORD - WITH RETRY!
-  const pass = page.locator('#password')
-    .or(page.locator('input[autocomplete="current-password"]'))
-    .or(page.getByLabel(/password|passwort/i))
-    .or(page.getByPlaceholder(/password|passwort/i))
-    .or(page.locator('input[type="password"]'))
-    .first();
+  // ✅ TYPE PASSWORD (cursor is now in password field!)
+  await page.keyboard.type(env.PASSWORD, { delay: 50 });
+  logLine("🔑 Typed password");
   
-  // ✅ RETRY LOGIC: Wait until field is STABLE!
-  let passVisible = false;
-  for (let i = 0; i < 5; i++) {
-    passVisible = await pass.isVisible().catch(() => false);
-    if (passVisible) {
-      logLine(`✅ Password field visible (attempt ${i + 1})`);
-      break;
-    }
-    logLine(`⏳ Waiting for password field (${i + 1}/5)...`);
-    await page.waitForTimeout(1000);
-  }
+  // ✅ ENTER TO SUBMIT
+  await page.keyboard.press("Enter");
+  logLine("⏎ Submitted with Enter");
   
-  if (!passVisible) {
-    logLine("❌ Password field never appeared after 5 retries!");
-    throw new Error("Password field not visible");
-  }
-  
-  await pass.fill(env.PASSWORD);
-  logLine("🔑 Filled password");
-  
-  // SUBMIT
-  const submit = page.locator('button.btn-primary')
-    .filter({ hasText: /sign in|login/i })
-    .or(page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i }))
-    .or(page.locator('button[type="submit"]'))
-    .first();
-  
-  await submit.waitFor({ state: "visible", timeout: 5000 });
-  
-  const clicked = await submit.click({ timeout: 2000 }).then(() => true).catch(() => false);
-  if (!clicked) {
-    logLine("⚠️ Button click failed, using Enter");
-    await pass.press("Enter");
-  } else {
-    logLine("✅ Clicked Sign In button");
-  }
-  
-  logLine("⏎ Submitted login form");
-  
+  // ✅ WAIT FOR NAVIGATION
   await page.waitForLoadState("networkidle", { timeout: 90000 });
   await dismissOverlays(page).catch(()=>{});
+  
+  // ✅ WAIT FOR REACT TO RENDER DASHBOARD (critical!)
+  await page.waitForTimeout(3000);
+  
   await page.waitForURL(/app\.algosone\.ai\/(dash|dashboard)/i, { timeout: 90000 }).catch(()=>{
     logLine("⚠️ No redirect to /dashboard after login");
   });
@@ -357,6 +325,9 @@ async function ensureOnDashboard(page) {
   }
   
   await dismissOverlays(page).catch(() => {});
+  
+  // ✅ WAIT BEFORE CHECKING (React needs time!)
+  await page.waitForTimeout(2000);
   
   const stillLoggedOut = await isLoggedOut(page);
   if (stillLoggedOut) {
@@ -746,7 +717,7 @@ app.get("/health", (_req, res) => res.json({
   hb: `${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`,
   maxAge: env.MAX_AGE_SEC,
   today: approvesToday,
-  version: "3.7"
+  version: "3.8-tab"
 }));
 
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
@@ -863,12 +834,12 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 Ultra-Fast Approver v3.7 :${env.PORT}`);
+  logLine(`🚀 Ultra-Fast Approver v3.8-tab :${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
   logLine(`⏱️ Max signal age: ${env.MAX_AGE_SEC}s`);
   logLine(`🔐 Login method: ${env.LOGIN_METHOD}`);
-  logLine(`✅ Fixed: React stability waits + password field retry`);
+  logLine(`✅ Tab-based login (bypasses password field visibility issues)`);
   logLine(`✅ Signal age re-check after login`);
   logLine(`✅ Robust body-text logout detection`);
   logLine(`⚡ Target: <5s signal→execution`);

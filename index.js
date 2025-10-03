@@ -1,4 +1,4 @@
-// index.js — ULTRA-FAST A1 Approver v3.6 - FINAL FIX
+// index.js — ULTRA-FAST A1 Approver v3.7 - LOGIN FIX ONLY
 
 import express from "express";
 import cron from "node-cron";
@@ -60,7 +60,6 @@ const inWindow = () => {
 };
 const ts = () => new Date().toISOString().split("T")[1].replace("Z","");
 
-// ✅ ROBUST: Body-text based login detection
 async function isLoggedOut(page) {
   const url = page.url();
   
@@ -227,15 +226,22 @@ async function handlePopupApprove(page, maxWait = 400) {
   }
 }
 
-// ---------- ✅ 2-STEP LOGIN (EMAIL → NEXT → PASSWORD → SIGN IN) ----------
+// ---------- ✅ FIXED LOGIN (WAIT FOR REACT STABILITY) ----------
 async function loginWithPassword(page) {
   logLine("🔐 Starting password login...");
   
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await page.waitForTimeout(1000);
+  
+  // ✅ WAIT FOR REACT TO RENDER
+  await page.waitForTimeout(2000);
   await dismissOverlays(page).catch(()=>{});
   
-  // ✅ STEP 1: EMAIL
+  // ✅ WAIT FOR NETWORK IDLE (React initial fetch)
+  await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {
+    logLine("⚠️ Network not idle after page load");
+  });
+  
+  // EMAIL
   const email = page.locator('#email')
     .or(page.locator('input[autocomplete="username"]'))
     .or(page.getByLabel(/email/i))
@@ -248,21 +254,15 @@ async function loginWithPassword(page) {
   await email.fill(env.EMAIL);
   logLine(`📧 Filled email: ${env.EMAIL}`);
   
-  // ✅ CHECK: Is there a NEXT/CONTINUE button? (2-step login)
-  const nextBtn = page.locator('button')
-    .filter({ hasText: /^(next|continue|weiter)$/i })
-    .first();
+  // ✅ CRITICAL: WAIT FOR REACT RE-RENDER AFTER EMAIL INPUT!
+  await page.waitForTimeout(1500);
   
-  const hasNextBtn = await nextBtn.count() > 0;
+  // ✅ WAIT FOR NETWORK IDLE (Email validation?)
+  await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {
+    logLine("⚠️ Network still active after email");
+  });
   
-  if (hasNextBtn) {
-    logLine("🔄 2-step login detected, clicking NEXT...");
-    await nextBtn.click({ timeout: 5000 });
-    await page.waitForTimeout(1500);
-    logLine("⏳ Waiting for password field...");
-  }
-  
-  // ✅ STEP 2: PASSWORD (now visible after NEXT)
+  // PASSWORD - WITH RETRY!
   const pass = page.locator('#password')
     .or(page.locator('input[autocomplete="current-password"]'))
     .or(page.getByLabel(/password|passwort/i))
@@ -270,11 +270,27 @@ async function loginWithPassword(page) {
     .or(page.locator('input[type="password"]'))
     .first();
   
-  await pass.waitFor({ state: "visible", timeout: 20000 }); 
+  // ✅ RETRY LOGIC: Wait until field is STABLE!
+  let passVisible = false;
+  for (let i = 0; i < 5; i++) {
+    passVisible = await pass.isVisible().catch(() => false);
+    if (passVisible) {
+      logLine(`✅ Password field visible (attempt ${i + 1})`);
+      break;
+    }
+    logLine(`⏳ Waiting for password field (${i + 1}/5)...`);
+    await page.waitForTimeout(1000);
+  }
+  
+  if (!passVisible) {
+    logLine("❌ Password field never appeared after 5 retries!");
+    throw new Error("Password field not visible");
+  }
+  
   await pass.fill(env.PASSWORD);
   logLine("🔑 Filled password");
   
-  // ✅ STEP 3: SUBMIT
+  // SUBMIT
   const submit = page.locator('button.btn-primary')
     .filter({ hasText: /sign in|login/i })
     .or(page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i }))
@@ -526,13 +542,12 @@ async function tryApproveOnDashboard(page) {
   return false;
 }
 
-// ---------- ✅ APPROVE WITH SIGNAL AGE RE-CHECK ----------
+// ---------- APPROVE WITH SIGNAL AGE RE-CHECK ----------
 async function approveOne(opts = { fast: true, signalTime: null }) {
   const execStart = Date.now();
   
-  // ✅ HELPER: Check signal age (DRY principle)
   const checkAge = () => {
-    if (!opts.signalTime) return true;  // No signal time = manual call = allow
+    if (!opts.signalTime) return true;
     const ageSec = Math.round((Date.now() - opts.signalTime) / 1000);
     if (ageSec > env.MAX_AGE_SEC) {
       logLine(`⏰ Too old: ${ageSec}s`);
@@ -542,7 +557,6 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
     return true;
   };
   
-  // ✅ CHECK 1: At start
   if (!checkAge()) return { ok: false, reason: "TOO_OLD" };
   
   if (!inWindow()) return { ok: false, reason: "OUTSIDE_WINDOW" };
@@ -558,7 +572,7 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         logLine(`[${ts()}] ${page.url()}`);
         
         if (/\/login/i.test(page.url())) {
-          logLine("⚠️ On login page - SKIP (heartbeat should have prevented this!)");
+          logLine("⚠️ On login page - SKIP");
           return { ok: false, reason: "LOGGED_OUT" };
         }
 
@@ -590,7 +604,6 @@ async function approveOne(opts = { fast: true, signalTime: null }) {
         return { ok: false, reason: "LOGIN_FAILED" };
       }
 
-      // ✅ CHECK 2: After login (re-check age!)
       if (!checkAge()) return { ok: false, reason: "TOO_OLD_AFTER_LOGIN" };
 
       for (let i = 0; i < 5; i++) {
@@ -733,7 +746,7 @@ app.get("/health", (_req, res) => res.json({
   hb: `${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`,
   maxAge: env.MAX_AGE_SEC,
   today: approvesToday,
-  version: "3.6"
+  version: "3.7"
 }));
 
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
@@ -850,14 +863,14 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
 
 // ---------- Start ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 Ultra-Fast Approver v3.6 :${env.PORT}`);
+  logLine(`🚀 Ultra-Fast Approver v3.7 :${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
   logLine(`⏱️ Max signal age: ${env.MAX_AGE_SEC}s`);
   logLine(`🔐 Login method: ${env.LOGIN_METHOD}`);
-  logLine(`✅ 2-step login (email → next → password)`);
+  logLine(`✅ Fixed: React stability waits + password field retry`);
   logLine(`✅ Signal age re-check after login`);
   logLine(`✅ Robust body-text logout detection`);
-  logLine(`⚡ Target: <4s signal→execution`);
+  logLine(`⚡ Target: <5s signal→execution`);
   scheduleNextHeartbeat();
 });

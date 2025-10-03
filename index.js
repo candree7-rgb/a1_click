@@ -1,4 +1,4 @@
-// index.js — A1 Approver v3.9 - Cookie Banner Fix Only
+// index.js — A1 Approver v3.9.1 - Cookie Fix + Initial Heartbeat
 
 import express from "express";
 import cron from "node-cron";
@@ -123,16 +123,16 @@ async function maybeConfirm(page) {
   }
 }
 
-// ---------- ✅ LOGIN - NUR COOKIE BANNER FIX! ----------
+// ---------- ✅ LOGIN - COOKIE BANNER FIX ----------
 async function loginWithPassword(page) {
   logLine("🔐 Password login...");
   
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
   
-  // ✅ FIX: Wait for cookie banner + dismiss + wait for animation!
+  // ✅ CRITICAL: Wait for cookie banner + dismiss + wait for animation!
   await page.waitForTimeout(1500);  // Banner appears
   await dismissOverlays(page).catch(()=>{});
-  await page.waitForTimeout(800);   // Animation finishes ← CRITICAL!
+  await page.waitForTimeout(800);   // Animation finishes
   
   // Email
   const email = page.getByLabel(/email/i)
@@ -400,7 +400,7 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- Heartbeat ----------
+// ---------- ✅ HEARTBEAT MIT LOGIN CHECK ----------
 const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 
 async function heartbeat(){
@@ -408,14 +408,27 @@ async function heartbeat(){
   try {
     await withCtx(async (page) => {
       await page.goto(env.DASH_URL, { waitUntil: "domcontentloaded", timeout: env.FAST_LOAD_MS }).catch(()=>{});
-      if (onLoginUrl(page) && env.EMAIL && env.PASSWORD) {
-        await ensureOnDashboard(page).catch(()=>{});
-      }
       await dismissOverlays(page).catch(()=>{});
+      
+      if (onLoginUrl(page)) {
+        logLine("🔄 HB: LOGGED OUT detected!");
+        if (env.EMAIL && env.PASSWORD) {
+          const success = await ensureOnDashboard(page).catch(() => false);
+          if (success) {
+            logLine("✅ HB: Re-logged in successfully!");
+          } else {
+            logLine("❌ HB: Re-login FAILED!");
+          }
+        } else {
+          logLine("❌ HB: No credentials for re-login");
+        }
+      } else {
+        logLine(`✅ HB: Still logged in (url: ${page.url()})`);
+      }
     });
     logLine("🔄 HB OK");
   } catch(e){ 
-    logLine("HB ERR:", e.message); 
+    logLine("❌ HB ERR:", e.message); 
   }
 }
 
@@ -433,6 +446,7 @@ function scheduleNextHeartbeat() {
 
 cron.schedule("0 0 * * *", () => { 
   approvesToday = 0; 
+  logLine("📅 Reset approval counter");
 }, { timezone: "UTC" });
 
 // ---------- HTTP ----------
@@ -465,7 +479,7 @@ app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
   hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`,
-  version: "3.9-cookie-fix"
+  version: "3.9.1"
 }));
 
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
@@ -564,11 +578,17 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
   res.json({ ok:true, lines: LOG_RING.slice(-300) });
 });
 
-// ---------- Start ----------
+// ---------- ✅ START MIT INITIAL HEARTBEAT ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 A1 Approver v3.9 (Cookie Fix) :${env.PORT}`);
+  logLine(`🚀 A1 Approver v3.9.1 :${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
-  logLine(`✅ Fixed: Cookie banner wait (1.5s + dismiss + 0.8s)`);
-  scheduleNextHeartbeat();
+  logLine(`✅ Cookie banner fix: 1.5s + dismiss + 0.8s`);
+  
+  // ✅ INITIAL HEARTBEAT SOFORT!
+  (async () => {
+    logLine("🔄 Initial heartbeat...");
+    await heartbeat();
+    scheduleNextHeartbeat();
+  })();
 });

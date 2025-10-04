@@ -1,4 +1,4 @@
-// index.js — A1 Approver v3.9.1 - Cookie Fix + Initial Heartbeat
+// index.js — A1 Approver v3.9.2 - Fix confirm dialog (scope → page)
 
 import express from "express";
 import cron from "node-cron";
@@ -123,18 +123,16 @@ async function maybeConfirm(page) {
   }
 }
 
-// ---------- ✅ LOGIN - COOKIE BANNER FIX ----------
+// ---------- LOGIN ----------
 async function loginWithPassword(page) {
   logLine("🔐 Password login...");
   
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
   
-  // ✅ CRITICAL: Wait for cookie banner + dismiss + wait for animation!
-  await page.waitForTimeout(1500);  // Banner appears
+  await page.waitForTimeout(1500);
   await dismissOverlays(page).catch(()=>{});
-  await page.waitForTimeout(800);   // Animation finishes
+  await page.waitForTimeout(800);
   
-  // Email
   const email = page.getByLabel(/email/i)
     .or(page.getByPlaceholder(/email|e-mail/i))
     .or(page.locator('input[type="email"]'))
@@ -144,7 +142,6 @@ async function loginWithPassword(page) {
   await email.fill(env.EMAIL);
   logLine("📧 Email filled");
   
-  // Password
   const pass = page.getByLabel(/password|passwort/i)
     .or(page.getByPlaceholder(/password|passwort/i))
     .or(page.locator('input[type="password"]'))
@@ -154,7 +151,6 @@ async function loginWithPassword(page) {
   await pass.fill(env.PASSWORD);
   logLine("🔑 Password filled");
   
-  // Submit
   const submit = page.getByRole("button", { name: /sign in|log in|anmelden|login|continue/i })
     .first()
     .or(page.locator('button[type="submit"]'))
@@ -313,7 +309,7 @@ async function tryApproveOnDashboard(page) {
 
     if (!clickWay) continue;
 
-    await maybeConfirm(scope);
+    await maybeConfirm(page);  // ✅ FIXED: scope → page
     await page.waitForTimeout(env.CLICK_WAIT_MS);
 
     const verdict = await verifyApproved(scope, btn);
@@ -400,7 +396,7 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- ✅ HEARTBEAT MIT LOGIN CHECK ----------
+// ---------- HEARTBEAT ----------
 const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 
 async function heartbeat(){
@@ -479,7 +475,7 @@ app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
   hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`,
-  version: "3.9.1"
+  version: "3.9.2"
 }));
 
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
@@ -578,14 +574,13 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
   res.json({ ok:true, lines: LOG_RING.slice(-300) });
 });
 
-// ---------- ✅ START MIT INITIAL HEARTBEAT ----------
+// ---------- START ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 A1 Approver v3.9.1 :${env.PORT}`);
+  logLine(`🚀 A1 Approver v3.9.2 :${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
-  logLine(`✅ Cookie banner fix: 1.5s + dismiss + 0.8s`);
+  logLine(`✅ Fix: Confirm dialog (scope → page)`);
   
-  // ✅ INITIAL HEARTBEAT SOFORT!
   (async () => {
     logLine("🔄 Initial heartbeat...");
     await heartbeat();

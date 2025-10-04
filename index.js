@@ -1,4 +1,4 @@
-// index.js — A1 Approver v3.9.2 - Fix confirm dialog (scope → page)
+// index.js — A1 Approver v3.9.3 - Double Approve Fix (v3.6 logic)
 
 import express from "express";
 import cron from "node-cron";
@@ -93,7 +93,7 @@ async function withCtx(fn) {
   }
 }
 
-// ---------- Overlays / Confirm ----------
+// ---------- Overlays ----------
 async function dismissOverlays(page) {
   const candidates = [
     page.getByRole("button", { name: /accept all|accept|agree|got it|okay|ok|verstanden|zustimmen/i }).first(),
@@ -113,22 +113,42 @@ async function dismissOverlays(page) {
   }
 }
 
-async function maybeConfirm(page) {
-  const dlg = page.getByRole("dialog");
-  if (await dlg.count() === 0) return;
-  const btn = dlg.getByRole("button", { name: /^(confirm|yes|ok|continue)$/i }).first();
-  if (await btn.count() > 0) { 
-    await btn.click().catch(()=>{}); 
-    await page.waitForTimeout(150); 
+// ✅ v3.6 POPUP HANDLER (NOT maybeConfirm!)
+async function handlePopupApprove(page, maxWait = 400) {
+  const started = Date.now();
+  
+  try {
+    const blueBtn = page.locator('[role="dialog"] button, dialog button')
+      .filter({ hasText: /^approve$/i })
+      .first();
+    
+    await blueBtn.waitFor({ state: 'visible', timeout: maxWait });
+    
+    const elapsed = Date.now() - started;
+    logLine(`🔵 Popup appeared (${elapsed}ms)`);
+    
+    const box = await blueBtn.boundingBox();
+    if (box) {
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      logLine("✅ Blue clicked!");
+      return true;
+    }
+    
+    await blueBtn.click({ timeout: 300 });
+    logLine("✅ Blue clicked!");
+    return true;
+  } catch {
+    return false;
   }
 }
 
-// ---------- LOGIN ----------
+// ---------- LOGIN (v3.9.1 - Cookie Banner Fix) ----------
 async function loginWithPassword(page) {
   logLine("🔐 Password login...");
   
   await page.goto(env.LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
   
+  // ✅ Cookie banner fix
   await page.waitForTimeout(1500);
   await dismissOverlays(page).catch(()=>{});
   await page.waitForTimeout(800);
@@ -299,6 +319,7 @@ async function verifyApproved(page, btnBefore) {
   return { ok, via: via || 'timeout' };
 }
 
+// ✅ v3.6 APPROVE LOGIC (with handlePopupApprove!)
 async function tryApproveOnDashboard(page) {
   for (const scope of allScopes(page)) {
     const { btn, why } = await findApproveInScope(scope);
@@ -306,11 +327,16 @@ async function tryApproveOnDashboard(page) {
 
     const clickWay = await clickSmart(scope, btn);
     logLine("clicked", { why, clickWay });
-
     if (!clickWay) continue;
 
-    await maybeConfirm(page);  // ✅ FIXED: scope → page
-    await page.waitForTimeout(env.CLICK_WAIT_MS);
+    // ✅ v3.6 STYLE: handlePopupApprove with page!
+    const hasPopup = await handlePopupApprove(page, 400);
+    
+    if (hasPopup) {
+      await page.waitForTimeout(300);
+    } else {
+      await page.waitForTimeout(env.CLICK_WAIT_MS);
+    }
 
     const verdict = await verifyApproved(scope, btn);
     logLine("verify", verdict);
@@ -396,7 +422,7 @@ async function approveOne(opts = { fast: true }) {
   }
 }
 
-// ---------- HEARTBEAT ----------
+// ---------- HEARTBEAT (v3.9.1 with re-login) ----------
 const rnd = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
 
 async function heartbeat(){
@@ -475,7 +501,7 @@ app.get("/health", (_req,res)=> res.json({
   ok:true,
   window:`${env.WINDOW_START}-${env.WINDOW_END} UTC`,
   hb:`${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN} min`,
-  version: "3.9.2"
+  version: "3.9.3"
 }));
 
 app.post("/hook/telegram", checkAuth, express.json({ limit: "64kb" }), async (req, res) => {
@@ -574,12 +600,13 @@ app.get("/debug/logs", checkAuth, (_req, res) => {
   res.json({ ok:true, lines: LOG_RING.slice(-300) });
 });
 
-// ---------- START ----------
+// ---------- START (v3.9.1 - Initial Heartbeat) ----------
 app.listen(Number(env.PORT), () => {
-  logLine(`🚀 A1 Approver v3.9.2 :${env.PORT}`);
+  logLine(`🚀 A1 Approver v3.9.3 :${env.PORT}`);
   logLine(`⏰ Window: ${env.WINDOW_START}-${env.WINDOW_END} UTC`);
   logLine(`💓 Heartbeat: ${env.HEARTBEAT_MIN_MIN}-${env.HEARTBEAT_MAX_MIN}min`);
-  logLine(`✅ Fix: Confirm dialog (scope → page)`);
+  logLine(`✅ Cookie banner fix: 1.5s + dismiss + 0.8s`);
+  logLine(`✅ Double approve fix: v3.6 handlePopupApprove`);
   
   (async () => {
     logLine("🔄 Initial heartbeat...");
